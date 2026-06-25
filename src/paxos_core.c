@@ -1,11 +1,48 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
-//
-// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #include "paxos_internal.h"
 #include <stdlib.h>
 #include <string.h>
+
+static bool paxos_is_duplicate(paxos_t* p, uint64_t client_id, uint64_t client_seq) {
+    if (client_id == 0) return false;
+    for (int i = 0; i < MAX_CLIENT_TRACKING; i++) {
+        if (p->client_sessions[i].client_id == client_id) {
+            return client_seq <= p->client_sessions[i].client_seq;
+        }
+    }
+    return false;
+}
+
+static void paxos_record_client_seq(paxos_t* p, uint64_t client_id, uint64_t client_seq) {
+    if (client_id == 0) return;
+    p->session_tick_counter++;
+
+    int empty_idx = -1;
+    int lru_idx = 0;
+    uint64_t oldest_tick = UINT64_MAX;
+
+    for (int i = 0; i < MAX_CLIENT_TRACKING; i++) {
+        if (p->client_sessions[i].client_id == client_id) {
+            if (client_seq > p->client_sessions[i].client_seq) {
+                p->client_sessions[i].client_seq = client_seq;
+            }
+            p->client_sessions[i].lru_tick = p->session_tick_counter;
+            return;
+        }
+        if (p->client_sessions[i].client_id == 0 && empty_idx == -1) empty_idx = i;
+        if (p->client_sessions[i].lru_tick < oldest_tick) {
+            oldest_tick = p->client_sessions[i].lru_tick;
+            lru_idx = i;
+        }
+    }
+
+    int target_idx = (empty_idx != -1) ? empty_idx : lru_idx;
+    p->client_sessions[target_idx].client_id = client_id;
+    p->client_sessions[target_idx].client_seq = client_seq;
+    p->client_sessions[target_idx].lru_tick = p->session_tick_counter;
+}
 
 paxos_t* paxos_create(uint64_t id, uint64_t* peers, size_t num_peers) {
     if (id == 0 || num_peers > MAX_REMOTE_PEERS) return NULL;
@@ -31,7 +68,6 @@ paxos_t* paxos_create(uint64_t id, uint64_t* peers, size_t num_peers) {
         return NULL;
     }
 
-    // Initialize timers for automated liveness
     p->current_tick = 0;
     p->heartbeat_timeout = 10;
     p->election_timeout = 30;
@@ -65,8 +101,8 @@ paxos_t* paxos_restore(uint64_t id, uint64_t* peers, size_t num_peers,
             paxos_destroy(p);
             return NULL;
         }
-        // When restoring from disk, these are already stable!
         p->log[e->slot - p->log_base_slot].unstable = false;
+        paxos_record_client_seq(p, e->client_id, e->client_seq);
     }
 
     return p;
@@ -92,7 +128,7 @@ void paxos_destroy(paxos_t* p) {
     if (p->msg_queue_after_persist) {
         for (size_t i = 0; i < p->msg_queue_after_persist_len; i++) {
             paxos_msg_t* m = &p->msg_queue_after_persist[i];
-            if ((m->type == MSG_PROMISE || m->type == MSG_FETCH_ENTRIES_RES) && m->entries) {
+            if ((m->type == MSG_PROMISE || m->type == MSG_FETCH_ENTRIES_RES || m->type == MSG_ACCEPT) && m->entries) {
                 for (size_t j = 0; j < m->num_entries; j++) paxos_entry_destroy(&m->entries[j]);
                 free(m->entries);
             }
@@ -137,7 +173,6 @@ static bool paxos_msg_is_valid(paxos_msg_t* msg) {
         return true;
     }
 
-    // Core network messages must have a ballot context, except ticks and read barriers
     if (msg->ballot == 0 && msg->type != MSG_READ_BARRIER && msg->type != MSG_TICK) return false;
 
     if (msg->type == MSG_PROMISE || msg->type == MSG_FETCH_ENTRIES_RES) {
@@ -155,13 +190,19 @@ static bool paxos_msg_is_valid(paxos_msg_t* msg) {
     return true;
 }
 
+static bool paxos_is_valid_peer(paxos_t* p, uint64_t from_id) {
+    for (size_t i = 0; i < p->num_peers; i++) {
+        if (p->peers[i] == from_id) return true;
+    }
+    return false;
+}
+
 void paxos_tick(paxos_t* p) {
     if (p->fatal_error) return;
 
     p->current_tick++;
 
     if (p->state == PAXOS_STATE_ACTIVE) {
-        // Leader maintains authority by broadcasting heartbeats
         if (p->current_tick >= p->heartbeat_timeout) {
             p->current_tick = 0;
             for (size_t i = 0; i < p->num_peers; i++) {
@@ -175,7 +216,6 @@ void paxos_tick(paxos_t* p) {
             }
         }
     } else {
-        // Follower assumes leader death if timeout triggers
         if (p->current_tick >= p->randomized_election_timeout) {
             p->current_tick = 0;
             p->randomized_election_timeout = p->election_timeout + (rand() % p->election_timeout);
@@ -198,16 +238,21 @@ void paxos_step_local(paxos_t* p, paxos_msg_t* msg) {
     }
 
     if (msg->type == MSG_PROPOSE) {
-        // Pipeline Stall: Block proposals if dynamic reconfiguration is in flight
+        paxos_entry_t* in_e = &msg->entries[0];
+
+        if (paxos_is_duplicate(p, in_e->client_id, in_e->client_seq)) return;
+
         for (uint64_t s = p->local_commit_index + 1; s < p->next_slot; s++) {
             paxos_entry_t* inflight_e = paxos_log_get(p, s);
-            if (inflight_e && (inflight_e->type == ENTRY_CONF_ADD || inflight_e->type == ENTRY_CONF_REMOVE)) {
-                return;
+            if (inflight_e) {
+                if (inflight_e->type == ENTRY_CONF_ADD || inflight_e->type == ENTRY_CONF_REMOVE) return;
+                if (in_e->client_id != 0 && inflight_e->client_id == in_e->client_id && inflight_e->client_seq >= in_e->client_seq) {
+                    return;
+                }
             }
         }
 
         uint64_t slot = p->next_slot++;
-        paxos_entry_t* in_e = &msg->entries[0];
 
         if (!paxos_log_accept(p, slot, p->active_ballot, in_e->type, in_e->client_id, in_e->client_seq, in_e->data, in_e->data_len)) {
             return;
@@ -221,18 +266,43 @@ void paxos_step_local(paxos_t* p, paxos_msg_t* msg) {
         inf->chosen = false;
         inf->active = true;
 
-        paxos_msg_t acc = { .type = MSG_ACCEPT, .ballot = p->active_ballot, .slot = slot, .commit_index = p->local_commit_index, .entries = paxos_log_get(p, slot), .num_entries = 1 };
+        // FIXED: Instant commit for 1-node clusters!
+        if (inf->acks >= ((p->num_peers + 1) / 2) + 1) {
+            inf->chosen = true;
+            p->local_commit_index = slot;
+            p->leader_commit_hint = slot;
+        }
+
+        // FIXED: Safe Deep-Copy inside the loop to prevent Double Free!
         for (size_t i = 0; i < p->num_peers; i++) {
+            paxos_entry_t* safe_copy = malloc(sizeof(paxos_entry_t));
+            if (!safe_copy || !paxos_entry_clone(safe_copy, paxos_log_get(p, slot))) {
+                if (safe_copy) free(safe_copy);
+                p->fatal_error = true;
+                return;
+            }
+
+            paxos_msg_t acc = {
+                .type = MSG_ACCEPT,
+                .ballot = p->active_ballot,
+                .slot = slot,
+                .commit_index = p->local_commit_index,
+                .entries = safe_copy,
+                .num_entries = 1
+            };
             acc.to = p->peers[i];
             paxos_send_after_persist(p, acc);
         }
     } else if (msg->type == MSG_READ_BARRIER) {
+        extern void paxos_proposer_read_barrier_local(paxos_t* p, paxos_msg_t* msg);
         paxos_proposer_read_barrier_local(p, msg);
     }
 }
 
 void paxos_step_remote(paxos_t* p, paxos_msg_t* msg) {
     if (p->fatal_error || msg->to != p->id || !paxos_msg_is_valid(msg)) return;
+
+    if (!paxos_is_valid_peer(p, msg->from)) return;
 
     switch (msg->type) {
         case MSG_PREPARE: case MSG_ACCEPT: case MSG_COMMIT_NOTICE: case MSG_FETCH_ENTRIES_RES: case MSG_INSTALL_SNAPSHOT: case MSG_READ_BARRIER: case MSG_TICK:
@@ -273,6 +343,7 @@ paxos_ready_t paxos_get_ready(paxos_t* p) {
                 paxos_entry_t* e = paxos_log_get(p, i);
                 if (e) {
                     paxos_entry_clone(&ready.chosen_entries[valid], e);
+                    paxos_record_client_seq(p, e->client_id, e->client_seq);
                     valid++;
                 }
             }
@@ -312,7 +383,6 @@ void paxos_advance(paxos_t* p, uint64_t stable_accepted_through, uint64_t applie
         p->last_applied = applied_slot;
     }
 
-    // Safely mark slots as stable only if they fall under the exact disk horizon
     for (size_t i = 0; i < p->log_cap; i++) {
         if (p->log[i].has_value && p->log[i].entry.slot <= p->stable_accepted_through) {
             p->log[i].unstable = false;
@@ -328,7 +398,8 @@ void paxos_advance(paxos_t* p, uint64_t stable_accepted_through, uint64_t applie
     if (p->msg_queue_after_persist) {
         for (size_t i = 0; i < p->msg_queue_after_persist_len; i++) {
             if ((p->msg_queue_after_persist[i].type == MSG_PROMISE ||
-                 p->msg_queue_after_persist[i].type == MSG_FETCH_ENTRIES_RES) &&
+                 p->msg_queue_after_persist[i].type == MSG_FETCH_ENTRIES_RES ||
+                 p->msg_queue_after_persist[i].type == MSG_ACCEPT) &&
                  p->msg_queue_after_persist[i].entries) {
                 for(size_t j = 0; j < p->msg_queue_after_persist[i].num_entries; j++) {
                     paxos_entry_destroy(&p->msg_queue_after_persist[i].entries[j]);

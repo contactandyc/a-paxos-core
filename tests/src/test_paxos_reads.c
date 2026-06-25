@@ -1,7 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
-//
-// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #define PAXOS_TESTING 1
 #include <stdio.h>
@@ -13,25 +11,21 @@ static void force_active_leader(paxos_t* p) {
     extern void paxos_proposer_campaign(paxos_t* p);
     paxos_proposer_campaign(p);
     paxos_advance(p, 0, 0);
-
-    // FIXED: Only simulate a promise response if there are actual network peers!
     if (p->num_peers > 0) {
-        paxos_msg_t prom = {
-            .type = MSG_PROMISE,
-            .to = p->id,
-            .from = p->peers[0],
-            .ballot = p->active_ballot,
-            .num_entries = 0
-        };
+        paxos_msg_t prom = { .type = MSG_PROMISE, .to = p->id, .from = p->peers[0], .ballot = p->active_ballot, .num_entries = 0 };
         paxos_step_remote(p, &prom);
+        paxos_advance(p, 0, 0);
+
+        paxos_msg_t ack = { .type = MSG_ACCEPTED, .to = p->id, .from = p->peers[0], .ballot = p->active_ballot, .slot = p->next_slot - 1 };
+        paxos_step_remote(p, &ack);
         paxos_advance(p, 0, 0);
     }
 }
 
 MACRO_TEST(paxos_read_single_node_instant_ready) {
-    uint64_t peers[] = {1}; // Self only
+    uint64_t peers[] = {1};
     paxos_t* p = paxos_create(1, peers, 0);
-    force_active_leader(p); // Now instantly campaigns to ACTIVE safely
+    force_active_leader(p);
 
     paxos_msg_t ri = { .type = MSG_READ_BARRIER, .read_seq = 100 };
     paxos_step_local(p, &ri);
@@ -54,6 +48,7 @@ MACRO_TEST(paxos_read_multi_node_waits_for_quorum) {
 
     paxos_ready_t ready1 = paxos_get_ready(p);
     MACRO_ASSERT_EQ_INT(ready1.num_read_states, 0);
+    // The read barrier ping generates 2 immediate messages to peers!
     MACRO_ASSERT_EQ_INT(ready1.num_messages_immediate, 2);
 
     paxos_msg_t res = {

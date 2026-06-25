@@ -1,7 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
-//
-// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #include "paxos_internal.h"
 #include <stdlib.h>
@@ -45,7 +43,6 @@ bool paxos_log_accept(paxos_t* p, uint64_t slot, uint64_t ballot, entry_type_t t
         p->log_cap = new_cap;
     }
 
-    // Atomic Allocation: Allocate first, swap second
     uint8_t* new_payload = NULL;
     if (data_len > 0) {
         new_payload = malloc(data_len);
@@ -66,7 +63,7 @@ bool paxos_log_accept(paxos_t* p, uint64_t slot, uint64_t ballot, entry_type_t t
     p->log[target_idx].entry.data_len = data_len;
 
     p->log[target_idx].has_value = true;
-    p->log[target_idx].unstable = true; // Flag for sparse persistence
+    p->log[target_idx].unstable = true;
 
     return true;
 }
@@ -174,9 +171,21 @@ void paxos_advance_local_commit(paxos_t* p) {
     while (p->local_commit_index < p->leader_commit_hint) {
         uint64_t check_slot = p->local_commit_index + 1;
         paxos_entry_t* e = paxos_log_get(p, check_slot);
+
         if (!e) break;
 
-        // Dynamic Reconfiguration Application
+        // Stale Commit Guard: Never blindly apply un-epoched data
+        if (e->accepted_ballot != p->promised_ballot) {
+            paxos_msg_t fetch = {
+                .type = MSG_FETCH_ENTRIES,
+                .to = p->leader_id,
+                .slot = check_slot,
+                .commit_index = check_slot
+            };
+            paxos_send_immediate(p, fetch);
+            break;
+        }
+
         if (e->type == ENTRY_CONF_ADD || e->type == ENTRY_CONF_REMOVE) {
             if (e->data_len == sizeof(uint64_t)) {
                 uint64_t target_node;

@@ -13,6 +13,13 @@
 #define MAX_REMOTE_PEERS (MAX_PEERS - 1)
 #define MAX_PENDING_READS 128
 #define INFLIGHT_WINDOW 4096
+#define MAX_CLIENT_TRACKING 1024
+
+typedef struct {
+    uint64_t client_id;
+    uint64_t client_seq;
+    uint64_t lru_tick;
+} paxos_client_session_t;
 
 typedef struct {
     bool has_value;
@@ -113,6 +120,9 @@ struct paxos_s {
     uint32_t heartbeat_timeout;
     uint32_t election_timeout;
     uint32_t randomized_election_timeout;
+
+    paxos_client_session_t client_sessions[MAX_CLIENT_TRACKING];
+    uint64_t session_tick_counter;
 
     bool fatal_error;
 };
