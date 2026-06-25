@@ -390,6 +390,55 @@ endif()
 
 add_test(NAME test_paxos_restore COMMAND $<TARGET_FILE:test_paxos_restore>)
 # ==============================================================================
+# test_paxos_simulator Target (Standard Test)
+# ==============================================================================
+add_executable(test_paxos_simulator
+  src/test_paxos_simulator.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_acceptor.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_core.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_log.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_proposer.c
+)
+
+target_include_directories(test_paxos_simulator BEFORE PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../src
+  ${CMAKE_CURRENT_SOURCE_DIR}/../include
+)
+
+list(APPEND TEST_EXECUTABLES test_paxos_simulator)
+
+set_target_properties(test_paxos_simulator PROPERTIES
+  C_STANDARD 23
+  C_STANDARD_REQUIRED YES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+)
+
+target_link_libraries(test_paxos_simulator PRIVATE the_macro_library::the_macro_library)
+target_link_libraries(test_paxos_simulator PRIVATE a_paxos_core::a_paxos_core)
+
+if(M_LIB)
+  target_link_libraries(test_paxos_simulator PRIVATE ${M_LIB})
+endif()
+
+if(MSVC)
+  target_compile_options(test_paxos_simulator PRIVATE /W4 ${TEST_COMPILER_OPTS})
+else()
+  target_compile_options(test_paxos_simulator PRIVATE -Wall -Wextra -Wpedantic ${TEST_COMPILER_OPTS})
+endif()
+
+if(A_ENABLE_COVERAGE)
+  if (CMAKE_C_COMPILER_ID MATCHES "Clang")
+    target_compile_options(test_paxos_simulator PRIVATE -O0 -g -fprofile-instr-generate -fcoverage-mapping)
+    target_link_options(test_paxos_simulator PRIVATE -fprofile-instr-generate -fcoverage-mapping)
+  elseif (CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(test_paxos_simulator PRIVATE -O0 -g --coverage)
+    target_link_options(test_paxos_simulator PRIVATE --coverage)
+  endif()
+endif()
+
+add_test(NAME test_paxos_simulator COMMAND $<TARGET_FILE:test_paxos_simulator>)
+# ==============================================================================
 # test_paxos_snapshot Target (Standard Test)
 # ==============================================================================
 add_executable(test_paxos_snapshot

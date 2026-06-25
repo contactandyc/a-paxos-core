@@ -66,6 +66,11 @@ typedef struct {
 } paxos_entry_t;
 
 typedef struct {
+    paxos_entry_t entry;
+    bool chosen;
+} paxos_restored_entry_t;
+
+typedef struct {
     msg_type_t type;
     uint64_t to;
     uint64_t from;
@@ -131,7 +136,7 @@ paxos_t* paxos_create(uint64_t id, uint64_t* peers, size_t num_peers);
 paxos_t* paxos_restore(uint64_t id, uint64_t* peers, size_t num_peers,
                        paxos_hard_state_t hard_state,
                        uint64_t local_commit_index, uint64_t snapshot_index,
-                       paxos_entry_t* entries, size_t num_entries);
+                       paxos_restored_entry_t* entries, size_t num_entries);
 
 void     paxos_destroy(paxos_t* p);
 
@@ -142,7 +147,7 @@ void paxos_tick(paxos_t* p);
 
 paxos_ready_t paxos_get_ready(paxos_t* p);
 void          paxos_ready_destroy(paxos_ready_t* ready);
-void          paxos_advance(paxos_t* p, uint64_t stable_accepted_through, uint64_t applied_slot);
+void paxos_advance(paxos_t* p, const uint64_t* stable_slots, size_t num_stable_slots, uint64_t applied_slot);
 
 // NEW: Core Snapshot Mechanics
 void          paxos_compact(paxos_t* p, uint64_t compact_slot);

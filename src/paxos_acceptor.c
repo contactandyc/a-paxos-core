@@ -10,6 +10,9 @@ static void reply_nack(paxos_t* p, paxos_msg_t* req) {
 
 static void check_and_fetch_gaps(paxos_t* p) {
     if (p->local_commit_index < p->leader_commit_hint && p->leader_id != 0) {
+        if (p->ticks_since_last_fetch < 5) return;
+        p->ticks_since_last_fetch = 0;
+
         paxos_msg_t fetch = {
             .type = MSG_FETCH_ENTRIES,
             .to = p->leader_id,
@@ -32,9 +35,10 @@ static void handle_fetch_entries_res(paxos_t* p, paxos_msg_t* msg) {
         uint64_t c_off = e->slot % PAXOS_LOG_CHUNK_SIZE;
         if (c_idx < p->log_chunks_cap && p->log_chunks[c_idx] && p->log_chunks[c_idx]->slots[c_off].has_value) {
             p->log_chunks[c_idx]->slots[c_off].chosen = true;
+            if (e->type >= ENTRY_CONF_ADD && e->type <= ENTRY_CONF_FINAL) paxos_rebuild_config(p);
         }
     }
-    paxos_advance_local_commit(p);
+    paxos_advance_local_commit(p, msg->from, msg->ballot);
     check_and_fetch_gaps(p);
 }
 
@@ -139,7 +143,8 @@ static void handle_accept(paxos_t* p, paxos_msg_t* msg) {
 
     paxos_msg_t res = { .type = MSG_ACCEPTED, .to = msg->from, .ballot = msg->ballot, .slot = msg->slot };
     paxos_send_after_persist(p, res);
-    paxos_advance_local_commit(p); check_and_fetch_gaps(p);
+    paxos_advance_local_commit(p, msg->from, msg->ballot);
+    check_and_fetch_gaps(p);
 }
 
 static void handle_tick(paxos_t* p, paxos_msg_t* msg) {
@@ -149,7 +154,8 @@ static void handle_tick(paxos_t* p, paxos_msg_t* msg) {
     p->leader_id = msg->from; p->current_tick = 0;
     if (msg->commit_index > p->leader_commit_hint) {
         p->leader_commit_hint = msg->commit_index;
-        paxos_advance_local_commit(p); check_and_fetch_gaps(p);
+        paxos_advance_local_commit(p, msg->from, msg->ballot);
+        check_and_fetch_gaps(p);
     }
 }
 
@@ -159,10 +165,15 @@ void paxos_acceptor_step(paxos_t* p, paxos_msg_t* msg) {
         case MSG_PREPARE: handle_prepare(p, msg); break;
         case MSG_ACCEPT: handle_accept(p, msg); break;
         case MSG_COMMIT_NOTICE:
+            observe_higher_ballot(p, msg->ballot);
+            // FAANG: Ignore commit notices that violate safety invariants
+            if (msg->ballot < p->promised_ballot || (p->leader_id != 0 && msg->from != p->leader_id)) return;
+
             p->leader_id = msg->from;
             if (msg->commit_index > p->leader_commit_hint) {
                 p->leader_commit_hint = msg->commit_index;
-                paxos_advance_local_commit(p); check_and_fetch_gaps(p);
+                paxos_advance_local_commit(p, msg->from, msg->ballot);
+                check_and_fetch_gaps(p);
             }
             break;
         case MSG_FETCH_ENTRIES_RES: handle_fetch_entries_res(p, msg); break;

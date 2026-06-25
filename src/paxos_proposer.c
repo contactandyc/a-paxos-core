@@ -16,10 +16,12 @@ static void merge_into_recovery(paxos_t* p, paxos_entry_t* e) {
 
     paxos_recovery_slot_t* r_slot = &p->recovery_buffer[e->slot];
     if (!r_slot->has_value || e->accepted_ballot > r_slot->highest_ballot_seen) {
-        if (r_slot->has_value && r_slot->recovered_value.data) free(r_slot->recovered_value.data);
+        if (r_slot->has_value) paxos_entry_destroy(&r_slot->recovered_value);
+
         r_slot->highest_ballot_seen = e->accepted_ballot;
         r_slot->has_value = true;
-        if (!paxos_entry_clone(&r_slot->recovered_value, e)) p->fatal_error = true;
+        // The network payload is already deep-copied by the framework into msg, we can retain it here safely.
+        if (!paxos_entry_clone_retain(&r_slot->recovered_value, e)) p->fatal_error = true;
     }
 }
 
@@ -44,14 +46,16 @@ static void check_promise_quorum_and_activate(paxos_t* p) {
                 uint64_t c_idx = s / PAXOS_LOG_CHUNK_SIZE;
                 uint64_t c_off = s % PAXOS_LOG_CHUNK_SIZE;
                 p->log_chunks[c_idx]->slots[c_off].chosen = true;
+                if (final_val.type >= ENTRY_CONF_ADD && final_val.type <= ENTRY_CONF_FINAL) paxos_rebuild_config(p);
                 if (s > p->local_commit_index) p->local_commit_index = s;
                 p->leader_commit_hint = s;
+                r_inf->active = false; // Clear single-node inflight
             } else {
                 uint64_t combined_mask = p->active_config_mask | p->joint_config_mask;
                 for(size_t j = 0; j < p->num_nodes; j++) {
                     if (p->node_directory[j] != p->id && ((1ULL << j) & combined_mask)) {
                         paxos_entry_t* safe_copy = malloc(sizeof(paxos_entry_t));
-                        if (safe_copy && paxos_entry_clone(safe_copy, paxos_log_get(p, s))) {
+                        if (safe_copy && paxos_entry_clone_retain(safe_copy, paxos_log_get(p, s))) {
                             paxos_msg_t acc = { .type = MSG_ACCEPT, .ballot = p->active_ballot, .slot = s, .commit_index = p->local_commit_index, .entries = safe_copy, .num_entries = 1 };
                             acc.to = p->node_directory[j]; paxos_send_after_persist(p, acc);
                         } else { if (safe_copy) free(safe_copy); p->fatal_error = true; }
@@ -76,13 +80,14 @@ static void check_promise_quorum_and_activate(paxos_t* p) {
                     uint64_t c_off = noop_slot % PAXOS_LOG_CHUNK_SIZE;
                     p->log_chunks[c_idx]->slots[c_off].chosen = true;
                     p->local_commit_index = noop_slot; p->leader_commit_hint = noop_slot;
+                    n_inf->active = false;
                 }
 
                 uint64_t combined_mask = p->active_config_mask | p->joint_config_mask;
                 for(size_t j = 0; j < p->num_nodes; j++) {
                     if (p->node_directory[j] != p->id && ((1ULL << j) & combined_mask)) {
                         paxos_entry_t* safe_copy = malloc(sizeof(paxos_entry_t));
-                        if (safe_copy && paxos_entry_clone(safe_copy, paxos_log_get(p, noop_slot))) {
+                        if (safe_copy && paxos_entry_clone_retain(safe_copy, paxos_log_get(p, noop_slot))) {
                             paxos_msg_t acc = { .type = MSG_ACCEPT, .ballot = p->active_ballot, .slot = noop_slot, .commit_index = p->local_commit_index, .entries = safe_copy, .num_entries = 1 };
                             acc.to = p->node_directory[j]; paxos_send_after_persist(p, acc);
                         } else { if (safe_copy) free(safe_copy); p->fatal_error = true; }
@@ -234,13 +239,15 @@ static void handle_accepted(paxos_t* p, paxos_msg_t* msg) {
                     uint64_t c_off = s % PAXOS_LOG_CHUNK_SIZE;
                     if (c_idx < p->log_chunks_cap && p->log_chunks[c_idx] && p->log_chunks[c_idx]->slots[c_off].has_value) {
                         p->log_chunks[c_idx]->slots[c_off].chosen = true;
+                        paxos_entry_t* e = &p->log_chunks[c_idx]->slots[c_off].entry;
+                        if (e->type >= ENTRY_CONF_ADD && e->type <= ENTRY_CONF_FINAL) paxos_rebuild_config(p);
                     }
                     highest_contiguous_chosen++; next_inf->active = false;
                 } else break;
             }
 
             if (highest_contiguous_chosen > p->leader_commit_hint) {
-                p->leader_commit_hint = highest_contiguous_chosen; paxos_advance_local_commit(p);
+                p->leader_commit_hint = highest_contiguous_chosen; paxos_advance_local_commit(p, p->id, p->active_ballot);
             }
 
             if (p->state == PAXOS_STATE_RECOVERING_PHASE2 && p->local_commit_index >= p->recovery_max_slot) {
@@ -258,13 +265,14 @@ static void handle_accepted(paxos_t* p, paxos_msg_t* msg) {
                         uint64_t c_off = noop_slot % PAXOS_LOG_CHUNK_SIZE;
                         p->log_chunks[c_idx]->slots[c_off].chosen = true;
                         p->local_commit_index = noop_slot; p->leader_commit_hint = noop_slot;
+                        n_inf->active = false;
                     }
 
                     uint64_t combined_mask = p->active_config_mask | p->joint_config_mask;
                     for(size_t j = 0; j < p->num_nodes; j++) {
                         if (p->node_directory[j] != p->id && ((1ULL << j) & combined_mask)) {
                             paxos_entry_t* safe_copy = malloc(sizeof(paxos_entry_t));
-                            if (safe_copy && paxos_entry_clone(safe_copy, paxos_log_get(p, noop_slot))) {
+                            if (safe_copy && paxos_entry_clone_retain(safe_copy, paxos_log_get(p, noop_slot))) {
                                 paxos_msg_t acc = { .type = MSG_ACCEPT, .ballot = p->active_ballot, .slot = noop_slot, .commit_index = p->local_commit_index, .entries = safe_copy, .num_entries = 1 };
                                 acc.to = p->node_directory[j]; paxos_send_after_persist(p, acc);
                             } else { if (safe_copy) free(safe_copy); p->fatal_error = true; }
