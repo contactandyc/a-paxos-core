@@ -149,6 +149,17 @@ paxos_ready_t paxos_get_ready(paxos_t* p);
 void          paxos_ready_destroy(paxos_ready_t* ready);
 void paxos_advance(paxos_t* p, const uint64_t* stable_slots, size_t num_stable_slots, uint64_t applied_slot);
 
+// Provides snapshot data chunks to the core for replication to a follower.
+// The host application calls this when intercepting an empty MSG_INSTALL_SNAPSHOT.
+bool paxos_set_snapshot_chunk(
+    paxos_t* p,
+    uint64_t peer_id,
+    const uint8_t* data,
+    size_t len,
+    uint64_t offset,
+    bool done
+);
+
 // NEW: Core Snapshot Mechanics
 void          paxos_compact(paxos_t* p, uint64_t compact_slot);
 void          paxos_snapshot_acked(paxos_t* p, bool success);

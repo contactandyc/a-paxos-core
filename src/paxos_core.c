@@ -41,7 +41,6 @@ paxos_t* paxos_create(uint64_t id, uint64_t* peers, size_t num_peers) {
     return p;
 }
 
-// FAANG: Safely restore accepted vs chosen state
 paxos_t* paxos_restore(uint64_t id, uint64_t* peers, size_t num_peers,
                        paxos_hard_state_t hard_state, uint64_t local_commit_index, uint64_t snapshot_index,
                        paxos_restored_entry_t* entries, size_t num_entries) {
@@ -92,13 +91,24 @@ void paxos_destroy(paxos_t* p) {
         for(size_t i = 0; i < p->recovery_cap; i++) paxos_entry_destroy(&p->recovery_buffer[i].recovered_value);
         free(p->recovery_buffer);
     }
-    if (p->msg_queue_immediate) free(p->msg_queue_immediate);
+
+    if (p->msg_queue_immediate) {
+        for (size_t i = 0; i < p->msg_queue_immediate_len; i++) {
+            if (p->msg_queue_immediate[i].type == MSG_INSTALL_SNAPSHOT && p->msg_queue_immediate[i].snapshot_data) {
+                free(p->msg_queue_immediate[i].snapshot_data);
+            }
+        }
+        free(p->msg_queue_immediate);
+    }
+
     if (p->msg_queue_after_persist) {
         for (size_t i = 0; i < p->msg_queue_after_persist_len; i++) {
             paxos_msg_t* m = &p->msg_queue_after_persist[i];
             if ((m->type == MSG_PROMISE || m->type == MSG_FETCH_ENTRIES_RES || m->type == MSG_ACCEPT) && m->entries) {
                 for (size_t j = 0; j < m->num_entries; j++) paxos_entry_destroy(&m->entries[j]);
                 free(m->entries);
+            } else if (m->type == MSG_INSTALL_SNAPSHOT && m->snapshot_data) {
+                free(m->snapshot_data);
             }
         }
         free(p->msg_queue_after_persist);
@@ -202,7 +212,6 @@ void paxos_step_local(paxos_t* p, paxos_msg_t* msg) {
     if (msg->type == MSG_PROPOSE) {
         paxos_entry_t* in_e = &msg->entries[0];
 
-        // FAANG: Disable unsafe config mutations until Joint Consensus logic handles application ordering
         if (in_e->type >= ENTRY_CONF_ADD && in_e->type <= ENTRY_CONF_FINAL) return;
 
         if (p->next_slot - p->local_commit_index >= INFLIGHT_WINDOW) return;
@@ -228,7 +237,7 @@ void paxos_step_local(paxos_t* p, paxos_msg_t* msg) {
             p->log_chunks[c_idx]->slots[c_off].chosen = true;
             p->local_commit_index = slot;
             p->leader_commit_hint = slot;
-            inf->active = false; // FAANG: Clear single-node ring cell to prevent perpetual backpressure
+            inf->active = false;
         }
 
         uint64_t combined_mask = p->active_config_mask | p->joint_config_mask;
@@ -341,19 +350,26 @@ void paxos_advance(paxos_t* p, const uint64_t* stable_slots, size_t num_stable_s
 
     p->prev_hard_state.promised_ballot = p->promised_ballot;
     p->prev_hard_state.max_generated_ballot = p->max_generated_ballot;
+
+    // FAANG: Safely free fully formed snapshot payloads that were sent out over the network!
+    for (size_t i = 0; i < p->msg_queue_immediate_len; i++) {
+        if (p->msg_queue_immediate[i].type == MSG_INSTALL_SNAPSHOT && p->msg_queue_immediate[i].snapshot_data) {
+            free(p->msg_queue_immediate[i].snapshot_data);
+        }
+    }
     p->msg_queue_immediate_len = 0;
     p->num_read_states = 0;
 
     if (p->msg_queue_after_persist) {
         for (size_t i = 0; i < p->msg_queue_after_persist_len; i++) {
-            if ((p->msg_queue_after_persist[i].type == MSG_PROMISE ||
-                 p->msg_queue_after_persist[i].type == MSG_FETCH_ENTRIES_RES ||
-                 p->msg_queue_after_persist[i].type == MSG_ACCEPT) &&
-                 p->msg_queue_after_persist[i].entries) {
-                for(size_t j = 0; j < p->msg_queue_after_persist[i].num_entries; j++) {
-                    paxos_entry_destroy(&p->msg_queue_after_persist[i].entries[j]);
+            paxos_msg_t* m = &p->msg_queue_after_persist[i];
+            if ((m->type == MSG_PROMISE || m->type == MSG_FETCH_ENTRIES_RES || m->type == MSG_ACCEPT) && m->entries) {
+                for(size_t j = 0; j < m->num_entries; j++) {
+                    paxos_entry_destroy(&m->entries[j]);
                 }
-                free(p->msg_queue_after_persist[i].entries);
+                free(m->entries);
+            } else if (m->type == MSG_INSTALL_SNAPSHOT && m->snapshot_data) {
+                free(m->snapshot_data);
             }
         }
     }
@@ -427,4 +443,39 @@ uint64_t paxos_last_slot(paxos_t* p) {
         }
     }
     return highest;
+}
+
+// FAANG: The public Snapshot Streaming API
+bool paxos_set_snapshot_chunk(paxos_t* p, uint64_t peer_id, const uint8_t* data, size_t len, uint64_t offset, bool done) {
+    if (p->fatal_error || p->state != PAXOS_STATE_ACTIVE) return false;
+
+    size_t peer_idx = 0; bool found = false;
+    for (size_t i = 0; i < p->num_nodes; i++) {
+        if (p->node_directory[i] == peer_id) { peer_idx = i; found = true; break; }
+    }
+    if (!found) return false;
+
+    // Ensure the host application is responding to the exact expected offset
+    if (p->snapshot_offset[peer_idx] != offset) return false;
+
+    uint8_t* chunk = NULL;
+    if (len > 0 && data) {
+        chunk = malloc(len);
+        if (!chunk) { p->fatal_error = true; return false; }
+        memcpy(chunk, data, len);
+    }
+
+    paxos_msg_t snap = {
+        .type = MSG_INSTALL_SNAPSHOT,
+        .to = peer_id,
+        .ballot = p->active_ballot,
+        .slot = p->snapshot_index,
+        .snapshot_offset = offset,
+        .snapshot_len = len,
+        .snapshot_data = chunk,
+        .snapshot_done = done
+    };
+
+    paxos_send_immediate(p, snap);
+    return true;
 }

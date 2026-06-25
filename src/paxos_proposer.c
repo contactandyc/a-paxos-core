@@ -27,6 +27,15 @@ static void merge_into_recovery(paxos_t* p, paxos_entry_t* e) {
 
 static void check_promise_quorum_and_activate(paxos_t* p) {
     if (paxos_has_quorum(p, p->promise_mask)) {
+
+        // FAANG: The Sparse Recovery Bomb Guard
+        if (p->recovery_max_slot > p->local_commit_index &&
+           (p->recovery_max_slot - p->local_commit_index > MAX_RECOVERY_GAP)) {
+            p->state = PAXOS_STATE_LEARNER;
+            p->leader_id = 0;
+            return; // Abort leadership. The gap is too large to safely repair in-memory.
+        }
+
         p->state = PAXOS_STATE_RECOVERING_PHASE2; p->leader_id = p->id;
 
         for (uint64_t s = p->local_commit_index + 1; s <= p->recovery_max_slot; s++) {

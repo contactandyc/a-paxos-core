@@ -8,13 +8,15 @@
 #include <string.h>
 #include <stddef.h>
 #include <stdlib.h>
+#include <stdatomic.h> // FAANG: Thread-Safe Reference Counting
 
 #define MAX_PEERS 64
 #define MAX_PENDING_READS 128
 #define INFLIGHT_WINDOW 4096
+#define MAX_RECOVERY_GAP 100000 // FAANG: Prevent Phase-1 DoS loops
 
 typedef struct {
-    uint32_t ref_count;
+    _Atomic uint32_t ref_count; // Atomic guarantee against multi-threaded network router corruption
     size_t data_len;
     uint8_t data[];
 } paxos_rc_data_t;
@@ -23,7 +25,7 @@ static inline uint8_t* paxos_payload_alloc(const uint8_t* data, size_t len) {
     if (len == 0) return NULL;
     paxos_rc_data_t* rc = malloc(sizeof(paxos_rc_data_t) + len);
     if (!rc) return NULL;
-    rc->ref_count = 1;
+    atomic_init(&rc->ref_count, 1);
     rc->data_len = len;
     if (data) memcpy(rc->data, data, len);
     return rc->data;
@@ -32,13 +34,15 @@ static inline uint8_t* paxos_payload_alloc(const uint8_t* data, size_t len) {
 static inline void paxos_payload_retain(uint8_t* data) {
     if (!data) return;
     paxos_rc_data_t* rc = (paxos_rc_data_t*)(data - offsetof(paxos_rc_data_t, data));
-    rc->ref_count++;
+    atomic_fetch_add_explicit(&rc->ref_count, 1, memory_order_relaxed);
 }
 
 static inline void paxos_payload_release(uint8_t* data) {
     if (!data) return;
     paxos_rc_data_t* rc = (paxos_rc_data_t*)(data - offsetof(paxos_rc_data_t, data));
-    if (--rc->ref_count == 0) free(rc);
+    if (atomic_fetch_sub_explicit(&rc->ref_count, 1, memory_order_acq_rel) == 1) {
+        free(rc);
+    }
 }
 
 #define PAXOS_LOG_CHUNK_SIZE 1024
@@ -155,8 +159,6 @@ struct paxos_s {
 
 void paxos_send_immediate(paxos_t* p, paxos_msg_t msg);
 void paxos_send_after_persist(paxos_t* p, paxos_msg_t msg);
-
-// FAANG: Strictly split the clone API to prevent segfaults on user/network buffers
 bool paxos_entry_clone_deep(paxos_entry_t* dst, const paxos_entry_t* src);
 bool paxos_entry_clone_retain(paxos_entry_t* dst, const paxos_entry_t* src);
 void paxos_entry_destroy(paxos_entry_t* e);
@@ -210,10 +212,7 @@ paxos_entry_t* paxos_log_get(paxos_t* p, uint64_t slot);
 paxos_entry_t* paxos_log_extract_unstable(paxos_t* p, size_t* out_count);
 paxos_entry_t* paxos_log_extract_range(paxos_t* p, uint64_t start_slot, uint64_t end_slot, size_t* out_count);
 paxos_entry_t* paxos_log_extract_suffix(paxos_t* p, uint64_t start_slot, size_t* out_count);
-
-// FAANG: Require explicit authorization to advance commit index
 void paxos_advance_local_commit(paxos_t* p, uint64_t author_id, uint64_t author_ballot);
-
 void paxos_acceptor_step(paxos_t* p, paxos_msg_t* msg);
 void paxos_proposer_step(paxos_t* p, paxos_msg_t* msg);
 void paxos_proposer_read_barrier_local(paxos_t* p, paxos_msg_t* msg);
