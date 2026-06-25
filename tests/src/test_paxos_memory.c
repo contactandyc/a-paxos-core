@@ -1,7 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
-//
-// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #define PAXOS_TESTING 1
 #include <stdio.h>
@@ -30,12 +28,12 @@ MACRO_TEST(paxos_log_dynamically_allocates_chunks_on_sparse_accept) {
     uint64_t peers[] = {2, 3};
     paxos_t* p = paxos_create(1, peers, 2);
 
-    MACRO_ASSERT_EQ_INT(p->log_chunks_cap, 16); // Starts with 16 chunk pointers
+    MACRO_ASSERT_EQ_INT(p->log_chunks_cap, 16);
 
-    uint64_t huge_slot = 1500000; // Force a massive jump in the sparse log
+    uint64_t huge_slot = 1500000;
     paxos_log_accept(p, huge_slot, 1, ENTRY_NORMAL, 0, 0, (uint8_t*)"A", 1);
 
-    uint64_t expected_c_idx = huge_slot / PAXOS_LOG_CHUNK_SIZE;
+    uint64_t expected_c_idx = paxos_chunk_idx(p, huge_slot);
 
     MACRO_ASSERT_TRUE(p->log_chunks_cap > expected_c_idx);
     MACRO_ASSERT_TRUE(p->log_chunks[expected_c_idx] != NULL);
@@ -53,13 +51,12 @@ MACRO_TEST(paxos_outbound_messages_use_zero_copy_ref_counting) {
     paxos_msg_t prop = { .type = MSG_PROPOSE, .entries = &e, .num_entries = 1 };
     paxos_step_local(p, &prop);
 
-    paxos_entry_t* log_entry = paxos_log_get(p, 2); // Slot 2 (Slot 1 is NoOp)
+    paxos_entry_t* log_entry = paxos_log_get(p, 2);
     MACRO_ASSERT_TRUE(log_entry != NULL);
 
     paxos_ready_t ready = paxos_get_ready(p);
     MACRO_ASSERT_TRUE(ready.num_messages_after_persist > 0);
 
-    // FAANG Zero-Copy: The outbound packet MUST point to the exact same memory address!
     uint8_t* outbound_data = ready.messages_after_persist[0].entries[0].data;
     MACRO_ASSERT_TRUE(outbound_data == log_entry->data);
 
@@ -71,24 +68,19 @@ MACRO_TEST(paxos_compact_frees_obsolete_chunks_in_o1) {
     uint64_t peers[] = {2, 3};
     paxos_t* p = paxos_create(1, peers, 2);
 
-    // Write to Chunk 0
     paxos_log_accept(p, 5, 1, ENTRY_NORMAL, 0, 0, (uint8_t*)"A", 1);
-
-    // Write to Chunk 2 (slots 2048 to 3071)
     paxos_log_accept(p, 2500, 1, ENTRY_NORMAL, 0, 0, (uint8_t*)"B", 1);
 
-    MACRO_ASSERT_TRUE(p->log_chunks[0] != NULL);
-    MACRO_ASSERT_TRUE(p->log_chunks[2] != NULL);
+    MACRO_ASSERT_TRUE(p->log_chunks[paxos_chunk_idx(p, 5)] != NULL);
+    MACRO_ASSERT_TRUE(p->log_chunks[paxos_chunk_idx(p, 2500)] != NULL);
 
-    // Compact up to slot 1500 (sweeps Chunk 0 entirely)
     p->last_applied = 1500;
-    paxos_compact(p, 1500);
+    paxos_compact(p, 1500); // This completely purges the first chunk and shifts the array down!
 
-    // FAANG O(1) Memory Drop: Chunk 0 should be instantly freed and NULLed out!
+    // The old chunk 0 should be gone, but because of relative indexing,
+    // the logical chunk that holds 2500 is safely shifted down and protected.
     MACRO_ASSERT_TRUE(p->log_chunks[0] == NULL);
-
-    // Chunk 2 survives
-    MACRO_ASSERT_TRUE(p->log_chunks[2] != NULL);
+    MACRO_ASSERT_TRUE(p->log_chunks[paxos_chunk_idx(p, 2500)] != NULL);
     MACRO_ASSERT_TRUE(paxos_log_get(p, 2500) != NULL);
 
     paxos_destroy(p);

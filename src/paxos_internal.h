@@ -80,11 +80,6 @@ typedef struct {
     bool active;
 } paxos_pending_read_t;
 
-typedef struct {
-    paxos_entry_t entry;
-    bool chosen;
-} paxos_restored_entry_t;
-
 struct paxos_s {
     uint64_t id;
     paxos_state_t state;
@@ -167,6 +162,18 @@ void paxos_send_after_persist(paxos_t* p, paxos_msg_t msg);
 bool paxos_entry_clone_deep(paxos_entry_t* dst, const paxos_entry_t* src);
 bool paxos_entry_clone_retain(paxos_entry_t* dst, const paxos_entry_t* src);
 void paxos_entry_destroy(paxos_entry_t* e);
+
+// FAANG: Safe global helpers for log addressing
+static inline uint64_t paxos_chunk_idx(paxos_t* p, uint64_t slot) {
+    uint64_t base_c = p->log_base_slot / PAXOS_LOG_CHUNK_SIZE;
+    uint64_t slot_c = slot / PAXOS_LOG_CHUNK_SIZE;
+    if (slot_c < base_c) return 0;
+    return slot_c - base_c;
+}
+
+static inline uint64_t paxos_chunk_off(uint64_t slot) {
+    return slot % PAXOS_LOG_CHUNK_SIZE;
+}
 
 static inline uint64_t paxos_peer_bit(paxos_t* p, uint64_t node_id) {
     if (node_id == 0) return 0;

@@ -145,6 +145,104 @@ endif()
 
 add_test(NAME test_paxos_catchup COMMAND $<TARGET_FILE:test_paxos_catchup>)
 # ==============================================================================
+# test_paxos_chosen_invariants Target (Standard Test)
+# ==============================================================================
+add_executable(test_paxos_chosen_invariants
+  src/test_paxos_chosen_invariants.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_acceptor.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_core.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_log.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_proposer.c
+)
+
+target_include_directories(test_paxos_chosen_invariants BEFORE PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../src
+  ${CMAKE_CURRENT_SOURCE_DIR}/../include
+)
+
+list(APPEND TEST_EXECUTABLES test_paxos_chosen_invariants)
+
+set_target_properties(test_paxos_chosen_invariants PROPERTIES
+  C_STANDARD 23
+  C_STANDARD_REQUIRED YES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+)
+
+target_link_libraries(test_paxos_chosen_invariants PRIVATE the_macro_library::the_macro_library)
+target_link_libraries(test_paxos_chosen_invariants PRIVATE a_paxos_core::a_paxos_core)
+
+if(M_LIB)
+  target_link_libraries(test_paxos_chosen_invariants PRIVATE ${M_LIB})
+endif()
+
+if(MSVC)
+  target_compile_options(test_paxos_chosen_invariants PRIVATE /W4 ${TEST_COMPILER_OPTS})
+else()
+  target_compile_options(test_paxos_chosen_invariants PRIVATE -Wall -Wextra -Wpedantic ${TEST_COMPILER_OPTS})
+endif()
+
+if(A_ENABLE_COVERAGE)
+  if (CMAKE_C_COMPILER_ID MATCHES "Clang")
+    target_compile_options(test_paxos_chosen_invariants PRIVATE -O0 -g -fprofile-instr-generate -fcoverage-mapping)
+    target_link_options(test_paxos_chosen_invariants PRIVATE -fprofile-instr-generate -fcoverage-mapping)
+  elseif (CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(test_paxos_chosen_invariants PRIVATE -O0 -g --coverage)
+    target_link_options(test_paxos_chosen_invariants PRIVATE --coverage)
+  endif()
+endif()
+
+add_test(NAME test_paxos_chosen_invariants COMMAND $<TARGET_FILE:test_paxos_chosen_invariants>)
+# ==============================================================================
+# test_paxos_crash_lifecycle Target (Standard Test)
+# ==============================================================================
+add_executable(test_paxos_crash_lifecycle
+  src/test_paxos_crash_lifecycle.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_acceptor.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_core.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_log.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_proposer.c
+)
+
+target_include_directories(test_paxos_crash_lifecycle BEFORE PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../src
+  ${CMAKE_CURRENT_SOURCE_DIR}/../include
+)
+
+list(APPEND TEST_EXECUTABLES test_paxos_crash_lifecycle)
+
+set_target_properties(test_paxos_crash_lifecycle PROPERTIES
+  C_STANDARD 23
+  C_STANDARD_REQUIRED YES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+)
+
+target_link_libraries(test_paxos_crash_lifecycle PRIVATE the_macro_library::the_macro_library)
+target_link_libraries(test_paxos_crash_lifecycle PRIVATE a_paxos_core::a_paxos_core)
+
+if(M_LIB)
+  target_link_libraries(test_paxos_crash_lifecycle PRIVATE ${M_LIB})
+endif()
+
+if(MSVC)
+  target_compile_options(test_paxos_crash_lifecycle PRIVATE /W4 ${TEST_COMPILER_OPTS})
+else()
+  target_compile_options(test_paxos_crash_lifecycle PRIVATE -Wall -Wextra -Wpedantic ${TEST_COMPILER_OPTS})
+endif()
+
+if(A_ENABLE_COVERAGE)
+  if (CMAKE_C_COMPILER_ID MATCHES "Clang")
+    target_compile_options(test_paxos_crash_lifecycle PRIVATE -O0 -g -fprofile-instr-generate -fcoverage-mapping)
+    target_link_options(test_paxos_crash_lifecycle PRIVATE -fprofile-instr-generate -fcoverage-mapping)
+  elseif (CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(test_paxos_crash_lifecycle PRIVATE -O0 -g --coverage)
+    target_link_options(test_paxos_crash_lifecycle PRIVATE --coverage)
+  endif()
+endif()
+
+add_test(NAME test_paxos_crash_lifecycle COMMAND $<TARGET_FILE:test_paxos_crash_lifecycle>)
+# ==============================================================================
 # test_paxos_firewall Target (Standard Test)
 # ==============================================================================
 add_executable(test_paxos_firewall
@@ -487,6 +585,55 @@ if(A_ENABLE_COVERAGE)
 endif()
 
 add_test(NAME test_paxos_reconfig_safety COMMAND $<TARGET_FILE:test_paxos_reconfig_safety>)
+# ==============================================================================
+# test_paxos_recovery_limits Target (Standard Test)
+# ==============================================================================
+add_executable(test_paxos_recovery_limits
+  src/test_paxos_recovery_limits.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_acceptor.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_core.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_log.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_proposer.c
+)
+
+target_include_directories(test_paxos_recovery_limits BEFORE PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../src
+  ${CMAKE_CURRENT_SOURCE_DIR}/../include
+)
+
+list(APPEND TEST_EXECUTABLES test_paxos_recovery_limits)
+
+set_target_properties(test_paxos_recovery_limits PROPERTIES
+  C_STANDARD 23
+  C_STANDARD_REQUIRED YES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+)
+
+target_link_libraries(test_paxos_recovery_limits PRIVATE the_macro_library::the_macro_library)
+target_link_libraries(test_paxos_recovery_limits PRIVATE a_paxos_core::a_paxos_core)
+
+if(M_LIB)
+  target_link_libraries(test_paxos_recovery_limits PRIVATE ${M_LIB})
+endif()
+
+if(MSVC)
+  target_compile_options(test_paxos_recovery_limits PRIVATE /W4 ${TEST_COMPILER_OPTS})
+else()
+  target_compile_options(test_paxos_recovery_limits PRIVATE -Wall -Wextra -Wpedantic ${TEST_COMPILER_OPTS})
+endif()
+
+if(A_ENABLE_COVERAGE)
+  if (CMAKE_C_COMPILER_ID MATCHES "Clang")
+    target_compile_options(test_paxos_recovery_limits PRIVATE -O0 -g -fprofile-instr-generate -fcoverage-mapping)
+    target_link_options(test_paxos_recovery_limits PRIVATE -fprofile-instr-generate -fcoverage-mapping)
+  elseif (CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(test_paxos_recovery_limits PRIVATE -O0 -g --coverage)
+    target_link_options(test_paxos_recovery_limits PRIVATE --coverage)
+  endif()
+endif()
+
+add_test(NAME test_paxos_recovery_limits COMMAND $<TARGET_FILE:test_paxos_recovery_limits>)
 # ==============================================================================
 # test_paxos_restore Target (Standard Test)
 # ==============================================================================

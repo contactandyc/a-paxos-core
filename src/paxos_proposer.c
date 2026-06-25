@@ -6,7 +6,6 @@
 static void merge_into_recovery(paxos_t* p, paxos_entry_t* e) {
     if (e->slot <= p->local_commit_index) return;
 
-    // FAANG: Guard against the Sparse Recovery Bomb BEFORE allocation
     if (e->slot - p->local_commit_index > MAX_RECOVERY_GAP) {
         p->fatal_error = true;
         return;
@@ -31,7 +30,6 @@ static void merge_into_recovery(paxos_t* p, paxos_entry_t* e) {
 
         r_slot->highest_ballot_seen = e->accepted_ballot;
         r_slot->has_value = true;
-        // FAANG: Incoming messages from remote callers might be stack-backed. MUST deep clone!
         if (!paxos_entry_clone_deep(&r_slot->recovered_value, e)) p->fatal_error = true;
     }
 }
@@ -56,11 +54,9 @@ static void check_promise_quorum_and_activate(paxos_t* p) {
             r_inf->chosen = false; r_inf->active = true;
 
             if (paxos_has_quorum(p, r_inf->ack_mask)) {
-                uint64_t rel_slot = s - p->log_base_slot;
-                uint64_t c_idx = rel_slot / PAXOS_LOG_CHUNK_SIZE;
-                uint64_t c_off = rel_slot % PAXOS_LOG_CHUNK_SIZE;
+                uint64_t c_idx = paxos_chunk_idx(p, s);
+                uint64_t c_off = paxos_chunk_off(s);
                 p->log_chunks[c_idx]->slots[c_off].chosen = true;
-                if (final_val.type >= ENTRY_CONF_ADD && final_val.type <= ENTRY_CONF_FINAL) paxos_rebuild_config(p);
                 if (s > p->local_commit_index) p->local_commit_index = s;
                 p->leader_commit_hint = s;
                 r_inf->active = false;
@@ -90,9 +86,8 @@ static void check_promise_quorum_and_activate(paxos_t* p) {
 
                 if (paxos_has_quorum(p, n_inf->ack_mask)) {
                     n_inf->chosen = true;
-                    uint64_t rel_slot = noop_slot - p->log_base_slot;
-                    uint64_t c_idx = rel_slot / PAXOS_LOG_CHUNK_SIZE;
-                    uint64_t c_off = rel_slot % PAXOS_LOG_CHUNK_SIZE;
+                    uint64_t c_idx = paxos_chunk_idx(p, noop_slot);
+                    uint64_t c_off = paxos_chunk_off(noop_slot);
                     p->log_chunks[c_idx]->slots[c_off].chosen = true;
                     p->local_commit_index = noop_slot; p->leader_commit_hint = noop_slot;
                     n_inf->active = false;
@@ -250,13 +245,10 @@ static void handle_accepted(paxos_t* p, paxos_msg_t* msg) {
                 paxos_inflight_slot_t* next_inf = &p->inflight[(highest_contiguous_chosen + 1) % INFLIGHT_WINDOW];
                 if (next_inf->active && next_inf->slot == highest_contiguous_chosen + 1 && next_inf->ballot == p->active_ballot && next_inf->chosen) {
                     uint64_t s = highest_contiguous_chosen + 1;
-                    uint64_t rel_slot = s - p->log_base_slot;
-                    uint64_t c_idx = rel_slot / PAXOS_LOG_CHUNK_SIZE;
-                    uint64_t c_off = rel_slot % PAXOS_LOG_CHUNK_SIZE;
+                    uint64_t c_idx = paxos_chunk_idx(p, s);
+                    uint64_t c_off = paxos_chunk_off(s);
                     if (c_idx < p->log_chunks_cap && p->log_chunks[c_idx] && p->log_chunks[c_idx]->slots[c_off].has_value) {
                         p->log_chunks[c_idx]->slots[c_off].chosen = true;
-                        paxos_entry_t* e = &p->log_chunks[c_idx]->slots[c_off].entry;
-                        if (e->type >= ENTRY_CONF_ADD && e->type <= ENTRY_CONF_FINAL) paxos_rebuild_config(p);
                     }
                     highest_contiguous_chosen++; next_inf->active = false;
                 } else break;
@@ -277,9 +269,8 @@ static void handle_accepted(paxos_t* p, paxos_msg_t* msg) {
 
                     if (paxos_has_quorum(p, n_inf->ack_mask)) {
                         n_inf->chosen = true;
-                        uint64_t rel_slot = noop_slot - p->log_base_slot;
-                        uint64_t c_idx = rel_slot / PAXOS_LOG_CHUNK_SIZE;
-                        uint64_t c_off = rel_slot % PAXOS_LOG_CHUNK_SIZE;
+                        uint64_t c_idx = paxos_chunk_idx(p, noop_slot);
+                        uint64_t c_off = paxos_chunk_off(noop_slot);
                         p->log_chunks[c_idx]->slots[c_off].chosen = true;
                         p->local_commit_index = noop_slot; p->leader_commit_hint = noop_slot;
                         n_inf->active = false;

@@ -32,9 +32,8 @@ static void handle_fetch_entries_res(paxos_t* p, paxos_msg_t* msg) {
         paxos_log_accept(p, e->slot, e->accepted_ballot, e->type, e->client_id, e->client_seq, e->data, e->data_len);
 
         if (e->slot < p->log_base_slot) continue;
-        uint64_t rel_slot = e->slot - p->log_base_slot;
-        uint64_t c_idx = rel_slot / PAXOS_LOG_CHUNK_SIZE;
-        uint64_t c_off = rel_slot % PAXOS_LOG_CHUNK_SIZE;
+        uint64_t c_idx = paxos_chunk_idx(p, e->slot);
+        uint64_t c_off = paxos_chunk_off(e->slot);
 
         if (c_idx < p->log_chunks_cap && p->log_chunks[c_idx] && p->log_chunks[c_idx]->slots[c_off].has_value) {
             p->log_chunks[c_idx]->slots[c_off].chosen = true;
@@ -136,12 +135,17 @@ static void handle_accept(paxos_t* p, paxos_msg_t* msg) {
     paxos_entry_t* e = &msg->entries[0];
     if (e->data_len > PAXOS_MAX_PAYLOAD_SIZE) return;
 
-    // FAANG: Explicitly reject config entries on the acceptor path too
     if (e->type >= ENTRY_CONF_ADD && e->type <= ENTRY_CONF_FINAL) return;
 
     paxos_entry_t* existing = paxos_log_get(p, msg->slot);
     if (existing) {
         if (existing->accepted_ballot > msg->ballot) { reply_nack(p, msg); return; }
+
+        // FAANG: Restored split-brain firewall! Reject mismatched data in the SAME ballot.
+        if (existing->accepted_ballot == msg->ballot && !paxos_entry_value_equal(existing, e)) {
+            p->fatal_error = true;
+            return;
+        }
     }
 
     p->promised_ballot = msg->ballot; p->leader_id = msg->from;

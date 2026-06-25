@@ -60,15 +60,13 @@ paxos_t* paxos_restore(uint64_t id, uint64_t* peers, size_t num_peers,
 
     for (size_t i = 0; i < num_entries; i++) {
         paxos_entry_t* e = &entries[i].entry;
-        // FAANG: Hard reject unsupported configs on restore
         if (e->type >= ENTRY_CONF_ADD && e->type <= ENTRY_CONF_FINAL) continue;
 
         if (!paxos_log_accept(p, e->slot, e->accepted_ballot, e->type, e->client_id, e->client_seq, e->data, e->data_len)) {
             paxos_destroy(p); return NULL;
         }
-        uint64_t rel_slot = e->slot - p->log_base_slot;
-        uint64_t c_idx = rel_slot / PAXOS_LOG_CHUNK_SIZE;
-        uint64_t c_off = rel_slot % PAXOS_LOG_CHUNK_SIZE;
+        uint64_t c_idx = paxos_chunk_idx(p, e->slot);
+        uint64_t c_off = paxos_chunk_off(e->slot);
         p->log_chunks[c_idx]->slots[c_off].unstable = false;
         p->log_chunks[c_idx]->slots[c_off].chosen = entries[i].chosen;
     }
@@ -215,7 +213,6 @@ void paxos_step_local(paxos_t* p, paxos_msg_t* msg) {
     if (msg->type == MSG_PROPOSE) {
         paxos_entry_t* in_e = &msg->entries[0];
 
-        // FAANG: Explicitly reject config entries until fully modeled.
         if (in_e->type >= ENTRY_CONF_ADD && in_e->type <= ENTRY_CONF_FINAL) return;
 
         if (p->next_slot - p->local_commit_index >= INFLIGHT_WINDOW) return;
@@ -234,9 +231,8 @@ void paxos_step_local(paxos_t* p, paxos_msg_t* msg) {
 
         if (paxos_has_quorum(p, inf->ack_mask)) {
             inf->chosen = true;
-            uint64_t rel_slot = slot - p->log_base_slot;
-            uint64_t c_idx = rel_slot / PAXOS_LOG_CHUNK_SIZE;
-            uint64_t c_off = rel_slot % PAXOS_LOG_CHUNK_SIZE;
+            uint64_t c_idx = paxos_chunk_idx(p, slot);
+            uint64_t c_off = paxos_chunk_off(slot);
             p->log_chunks[c_idx]->slots[c_off].chosen = true;
             p->local_commit_index = slot;
             p->leader_commit_hint = slot;
@@ -298,9 +294,8 @@ paxos_ready_t paxos_get_ready(paxos_t* p) {
         if (ready.chosen_entries) {
             size_t valid = 0;
             for (uint64_t i = p->last_applied + 1; i <= p->local_commit_index; i++) {
-                uint64_t rel_slot = i - p->log_base_slot;
-                uint64_t c_idx = rel_slot / PAXOS_LOG_CHUNK_SIZE;
-                uint64_t c_off = rel_slot % PAXOS_LOG_CHUNK_SIZE;
+                uint64_t c_idx = paxos_chunk_idx(p, i);
+                uint64_t c_off = paxos_chunk_off(i);
 
                 if (c_idx >= p->log_chunks_cap || !p->log_chunks[c_idx]) break;
                 paxos_log_slot_t* slot_data = &p->log_chunks[c_idx]->slots[c_off];
@@ -345,9 +340,8 @@ void paxos_advance(paxos_t* p, const uint64_t* stable_slots, size_t num_stable_s
     for (size_t i = 0; i < num_stable_slots; i++) {
         uint64_t s = stable_slots[i];
         if (s < p->log_base_slot) continue;
-        uint64_t rel_slot = s - p->log_base_slot;
-        uint64_t c_idx = rel_slot / PAXOS_LOG_CHUNK_SIZE;
-        uint64_t c_off = rel_slot % PAXOS_LOG_CHUNK_SIZE;
+        uint64_t c_idx = paxos_chunk_idx(p, s);
+        uint64_t c_off = paxos_chunk_off(s);
         if (c_idx < p->log_chunks_cap && p->log_chunks[c_idx] && p->log_chunks[c_idx]->slots[c_off].has_value) {
             p->log_chunks[c_idx]->slots[c_off].unstable = false;
             if (s > p->stable_accepted_through) p->stable_accepted_through = s;
