@@ -138,7 +138,42 @@ paxos_entry_t* paxos_log_extract_range(paxos_t* p, uint64_t start_slot, uint64_t
 void paxos_advance_local_commit(paxos_t* p) {
     while (p->local_commit_index < p->leader_commit_hint) {
         uint64_t check_slot = p->local_commit_index + 1;
-        if (!paxos_log_get(p, check_slot)) break;
+        paxos_entry_t* e = paxos_log_get(p, check_slot);
+        if (!e) break;
+
+        // NEW: Dynamic Reconfiguration Application
+        if (e->type == ENTRY_CONF_ADD || e->type == ENTRY_CONF_REMOVE) {
+            if (e->data_len == sizeof(uint64_t)) {
+                uint64_t target_node;
+                memcpy(&target_node, e->data, sizeof(uint64_t));
+
+                if (e->type == ENTRY_CONF_ADD) {
+                    bool exists = (p->id == target_node);
+                    for (size_t i = 0; i < p->num_peers; i++) {
+                        if (p->peers[i] == target_node) exists = true;
+                    }
+                    if (!exists && p->num_peers < MAX_REMOTE_PEERS) {
+                        p->peers[p->num_peers++] = target_node;
+                    }
+                } else if (e->type == ENTRY_CONF_REMOVE) {
+                    if (p->id == target_node) {
+                        // We removed ourselves! Step down immediately.
+                        p->state = PAXOS_STATE_LEARNER;
+                        p->leader_id = 0;
+                    } else {
+                        // Find and remove the remote peer, sliding the array down
+                        for (size_t i = 0; i < p->num_peers; i++) {
+                            if (p->peers[i] == target_node) {
+                                p->peers[i] = p->peers[p->num_peers - 1];
+                                p->num_peers--;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         p->local_commit_index++;
     }
 }

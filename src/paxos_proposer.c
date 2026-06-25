@@ -1,5 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
+//
+// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #include "paxos_internal.h"
 #include <string.h>
@@ -226,10 +228,17 @@ static void handle_accepted(paxos_t* p, paxos_msg_t* msg) {
         if (has_quorum(p, inf->acks)) {
             inf->chosen = true;
 
-            while (p->local_commit_index + 1 < p->next_slot && p->inflight[(p->local_commit_index + 1) % 4096].chosen) {
-                p->local_commit_index++;
-                p->leader_commit_hint = p->local_commit_index;
-                p->inflight[p->local_commit_index % 4096].active = false;
+            // FIXED: Scan forward to find the highest contiguous chosen slot
+            uint64_t highest_contiguous_chosen = p->local_commit_index;
+            while (highest_contiguous_chosen + 1 < p->next_slot && p->inflight[(highest_contiguous_chosen + 1) % 4096].chosen) {
+                highest_contiguous_chosen++;
+                p->inflight[highest_contiguous_chosen % 4096].active = false;
+            }
+
+            // FIXED: Route it through the official commit pipeline so config changes apply!
+            if (highest_contiguous_chosen > p->leader_commit_hint) {
+                p->leader_commit_hint = highest_contiguous_chosen;
+                paxos_advance_local_commit(p);
             }
 
             if (p->state == PAXOS_STATE_RECOVERING_PHASE2 && p->local_commit_index >= p->recovery_max_slot) {

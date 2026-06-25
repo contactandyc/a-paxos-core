@@ -98,6 +98,16 @@ void paxos_step_local(paxos_t* p, paxos_msg_t* msg) {
     if (msg->type == MSG_PROPOSE) {
         if (p->state != PAXOS_STATE_ACTIVE) return;
 
+        // NEW: Pipeline Stall for Safe Reconfiguration
+        // We scan the uncommitted tail. If a config change is inflight, we MUST
+        // drop new proposals until it is fully committed.
+        for (uint64_t s = p->local_commit_index + 1; s < p->next_slot; s++) {
+            paxos_entry_t* inflight_e = paxos_log_get(p, s);
+            if (inflight_e && (inflight_e->type == ENTRY_CONF_ADD || inflight_e->type == ENTRY_CONF_REMOVE)) {
+                return; // Yields backpressure to the host application
+            }
+        }
+
         uint64_t slot = p->next_slot++;
         paxos_entry_t* in_e = &msg->entries[0];
 
@@ -119,7 +129,7 @@ void paxos_step_local(paxos_t* p, paxos_msg_t* msg) {
             paxos_send_after_persist(p, acc);
         }
     } else if (msg->type == MSG_READ_BARRIER) {
-        paxos_proposer_read_barrier_local(p, msg); // <-- NEW
+        paxos_proposer_read_barrier_local(p, msg);
     }
 }
 
