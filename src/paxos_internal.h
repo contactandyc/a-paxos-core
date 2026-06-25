@@ -1,7 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
-//
-// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #ifndef PAXOS_INTERNAL_H
 #define PAXOS_INTERNAL_H
@@ -10,15 +8,15 @@
 #include <string.h>
 #include <stddef.h>
 #include <stdlib.h>
-#include <stdatomic.h> // FAANG: Thread-Safe Reference Counting
+#include <stdatomic.h>
 
 #define MAX_PEERS 64
 #define MAX_PENDING_READS 128
 #define INFLIGHT_WINDOW 4096
-#define MAX_RECOVERY_GAP 100000 // FAANG: Prevent Phase-1 DoS loops
+#define MAX_RECOVERY_GAP 100000
 
 typedef struct {
-    _Atomic uint32_t ref_count; // Atomic guarantee against multi-threaded network router corruption
+    _Atomic uint32_t ref_count;
     size_t data_len;
     uint8_t data[];
 } paxos_rc_data_t;
@@ -82,6 +80,11 @@ typedef struct {
     bool active;
 } paxos_pending_read_t;
 
+typedef struct {
+    paxos_entry_t entry;
+    bool chosen;
+} paxos_restored_entry_t;
+
 struct paxos_s {
     uint64_t id;
     paxos_state_t state;
@@ -92,7 +95,6 @@ struct paxos_s {
     uint64_t active_config_mask;
     uint64_t joint_config_mask;
     bool in_joint_consensus;
-    uint64_t highest_config_slot;
 
     uint64_t promised_ballot;
     uint64_t max_generated_ballot;
@@ -161,6 +163,7 @@ struct paxos_s {
 
 void paxos_send_immediate(paxos_t* p, paxos_msg_t msg);
 void paxos_send_after_persist(paxos_t* p, paxos_msg_t msg);
+
 bool paxos_entry_clone_deep(paxos_entry_t* dst, const paxos_entry_t* src);
 bool paxos_entry_clone_retain(paxos_entry_t* dst, const paxos_entry_t* src);
 void paxos_entry_destroy(paxos_entry_t* e);

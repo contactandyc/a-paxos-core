@@ -31,11 +31,13 @@ static void handle_fetch_entries_res(paxos_t* p, paxos_msg_t* msg) {
         paxos_entry_t* e = &msg->entries[i];
         paxos_log_accept(p, e->slot, e->accepted_ballot, e->type, e->client_id, e->client_seq, e->data, e->data_len);
 
-        uint64_t c_idx = e->slot / PAXOS_LOG_CHUNK_SIZE;
-        uint64_t c_off = e->slot % PAXOS_LOG_CHUNK_SIZE;
+        if (e->slot < p->log_base_slot) continue;
+        uint64_t rel_slot = e->slot - p->log_base_slot;
+        uint64_t c_idx = rel_slot / PAXOS_LOG_CHUNK_SIZE;
+        uint64_t c_off = rel_slot % PAXOS_LOG_CHUNK_SIZE;
+
         if (c_idx < p->log_chunks_cap && p->log_chunks[c_idx] && p->log_chunks[c_idx]->slots[c_off].has_value) {
             p->log_chunks[c_idx]->slots[c_off].chosen = true;
-            if (e->type >= ENTRY_CONF_ADD && e->type <= ENTRY_CONF_FINAL) paxos_rebuild_config(p);
         }
     }
     paxos_advance_local_commit(p, msg->from, msg->ballot);
@@ -66,7 +68,6 @@ static void handle_install_snapshot(paxos_t* p, paxos_msg_t* msg) {
             paxos_send_immediate(p, res); return;
         }
         if (msg->snapshot_offset == 0) {
-            // FAANG: Guard against network replays of Chunk 0 resetting our snapshot stream
             if (p->pending_snapshot && p->pending_snapshot_msg_slot == msg->slot && p->expected_snapshot_offset > 0) {
                 paxos_msg_t res = { .type = MSG_INSTALL_SNAPSHOT_RES, .to = msg->from, .ballot = p->promised_ballot, .reject = true, .slot = p->expected_snapshot_offset };
                 paxos_send_immediate(p, res); return;
@@ -135,10 +136,12 @@ static void handle_accept(paxos_t* p, paxos_msg_t* msg) {
     paxos_entry_t* e = &msg->entries[0];
     if (e->data_len > PAXOS_MAX_PAYLOAD_SIZE) return;
 
+    // FAANG: Explicitly reject config entries on the acceptor path too
+    if (e->type >= ENTRY_CONF_ADD && e->type <= ENTRY_CONF_FINAL) return;
+
     paxos_entry_t* existing = paxos_log_get(p, msg->slot);
     if (existing) {
         if (existing->accepted_ballot > msg->ballot) { reply_nack(p, msg); return; }
-        if (existing->accepted_ballot == msg->ballot && !paxos_entry_value_equal(existing, e)) { p->fatal_error = true; return; }
     }
 
     p->promised_ballot = msg->ballot; p->leader_id = msg->from;

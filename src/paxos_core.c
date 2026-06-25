@@ -1,7 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
-//
-// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #include "paxos_internal.h"
 
@@ -62,16 +60,19 @@ paxos_t* paxos_restore(uint64_t id, uint64_t* peers, size_t num_peers,
 
     for (size_t i = 0; i < num_entries; i++) {
         paxos_entry_t* e = &entries[i].entry;
+        // FAANG: Hard reject unsupported configs on restore
+        if (e->type >= ENTRY_CONF_ADD && e->type <= ENTRY_CONF_FINAL) continue;
+
         if (!paxos_log_accept(p, e->slot, e->accepted_ballot, e->type, e->client_id, e->client_seq, e->data, e->data_len)) {
             paxos_destroy(p); return NULL;
         }
-        uint64_t c_idx = e->slot / PAXOS_LOG_CHUNK_SIZE;
-        uint64_t c_off = e->slot % PAXOS_LOG_CHUNK_SIZE;
+        uint64_t rel_slot = e->slot - p->log_base_slot;
+        uint64_t c_idx = rel_slot / PAXOS_LOG_CHUNK_SIZE;
+        uint64_t c_off = rel_slot % PAXOS_LOG_CHUNK_SIZE;
         p->log_chunks[c_idx]->slots[c_off].unstable = false;
         p->log_chunks[c_idx]->slots[c_off].chosen = entries[i].chosen;
     }
 
-    paxos_rebuild_config(p);
     return p;
 }
 
@@ -214,13 +215,12 @@ void paxos_step_local(paxos_t* p, paxos_msg_t* msg) {
     if (msg->type == MSG_PROPOSE) {
         paxos_entry_t* in_e = &msg->entries[0];
 
+        // FAANG: Explicitly reject config entries until fully modeled.
         if (in_e->type >= ENTRY_CONF_ADD && in_e->type <= ENTRY_CONF_FINAL) return;
 
         if (p->next_slot - p->local_commit_index >= INFLIGHT_WINDOW) return;
         paxos_inflight_slot_t* target_inf = &p->inflight[p->next_slot % INFLIGHT_WINDOW];
         if (target_inf->active) return;
-
-        if (p->highest_config_slot > p->local_commit_index) return;
 
         uint64_t slot = p->next_slot++;
         if (!paxos_log_accept(p, slot, p->active_ballot, in_e->type, in_e->client_id, in_e->client_seq, in_e->data, in_e->data_len)) return;
@@ -234,8 +234,9 @@ void paxos_step_local(paxos_t* p, paxos_msg_t* msg) {
 
         if (paxos_has_quorum(p, inf->ack_mask)) {
             inf->chosen = true;
-            uint64_t c_idx = slot / PAXOS_LOG_CHUNK_SIZE;
-            uint64_t c_off = slot % PAXOS_LOG_CHUNK_SIZE;
+            uint64_t rel_slot = slot - p->log_base_slot;
+            uint64_t c_idx = rel_slot / PAXOS_LOG_CHUNK_SIZE;
+            uint64_t c_off = rel_slot % PAXOS_LOG_CHUNK_SIZE;
             p->log_chunks[c_idx]->slots[c_off].chosen = true;
             p->local_commit_index = slot;
             p->leader_commit_hint = slot;
@@ -297,8 +298,9 @@ paxos_ready_t paxos_get_ready(paxos_t* p) {
         if (ready.chosen_entries) {
             size_t valid = 0;
             for (uint64_t i = p->last_applied + 1; i <= p->local_commit_index; i++) {
-                uint64_t c_idx = i / PAXOS_LOG_CHUNK_SIZE;
-                uint64_t c_off = i % PAXOS_LOG_CHUNK_SIZE;
+                uint64_t rel_slot = i - p->log_base_slot;
+                uint64_t c_idx = rel_slot / PAXOS_LOG_CHUNK_SIZE;
+                uint64_t c_off = rel_slot % PAXOS_LOG_CHUNK_SIZE;
 
                 if (c_idx >= p->log_chunks_cap || !p->log_chunks[c_idx]) break;
                 paxos_log_slot_t* slot_data = &p->log_chunks[c_idx]->slots[c_off];
@@ -342,8 +344,10 @@ void paxos_advance(paxos_t* p, const uint64_t* stable_slots, size_t num_stable_s
 
     for (size_t i = 0; i < num_stable_slots; i++) {
         uint64_t s = stable_slots[i];
-        uint64_t c_idx = s / PAXOS_LOG_CHUNK_SIZE;
-        uint64_t c_off = s % PAXOS_LOG_CHUNK_SIZE;
+        if (s < p->log_base_slot) continue;
+        uint64_t rel_slot = s - p->log_base_slot;
+        uint64_t c_idx = rel_slot / PAXOS_LOG_CHUNK_SIZE;
+        uint64_t c_off = rel_slot % PAXOS_LOG_CHUNK_SIZE;
         if (c_idx < p->log_chunks_cap && p->log_chunks[c_idx] && p->log_chunks[c_idx]->slots[c_off].has_value) {
             p->log_chunks[c_idx]->slots[c_off].unstable = false;
             if (s > p->stable_accepted_through) p->stable_accepted_through = s;
@@ -353,7 +357,6 @@ void paxos_advance(paxos_t* p, const uint64_t* stable_slots, size_t num_stable_s
     p->prev_hard_state.promised_ballot = p->promised_ballot;
     p->prev_hard_state.max_generated_ballot = p->max_generated_ballot;
 
-    // FAANG: Safely free fully formed snapshot payloads that were sent out over the network!
     for (size_t i = 0; i < p->msg_queue_immediate_len; i++) {
         if (p->msg_queue_immediate[i].type == MSG_INSTALL_SNAPSHOT && p->msg_queue_immediate[i].snapshot_data) {
             free(p->msg_queue_immediate[i].snapshot_data);
@@ -411,7 +414,6 @@ void paxos_snapshot_acked(paxos_t* p, bool success) {
         p->last_applied = p->snapshot_index;
         p->local_commit_index = p->snapshot_index;
         p->leader_commit_hint = p->snapshot_index;
-        paxos_rebuild_config(p);
     }
 
     paxos_send_immediate(p, res);
@@ -447,7 +449,6 @@ uint64_t paxos_last_slot(paxos_t* p) {
     return highest;
 }
 
-// FAANG: The public Snapshot Streaming API
 bool paxos_set_snapshot_chunk(paxos_t* p, uint64_t peer_id, const uint8_t* data, size_t len, uint64_t offset, bool done) {
     if (p->fatal_error || p->state != PAXOS_STATE_ACTIVE) return false;
 
@@ -457,7 +458,6 @@ bool paxos_set_snapshot_chunk(paxos_t* p, uint64_t peer_id, const uint8_t* data,
     }
     if (!found) return false;
 
-    // Ensure the host application is responding to the exact expected offset
     if (p->snapshot_offset[peer_idx] != offset) return false;
 
     uint8_t* chunk = NULL;

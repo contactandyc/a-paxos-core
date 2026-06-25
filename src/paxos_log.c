@@ -1,11 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
-//
-// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #include "paxos_internal.h"
 
-// FAANG: Safely deep-copy external user/network buffers
 bool paxos_entry_clone_deep(paxos_entry_t* dst, const paxos_entry_t* src) {
     *dst = *src;
     dst->data = paxos_payload_alloc(src->data, src->data_len);
@@ -13,7 +10,6 @@ bool paxos_entry_clone_deep(paxos_entry_t* dst, const paxos_entry_t* src) {
     return true;
 }
 
-// FAANG: Fast path for internal log references
 bool paxos_entry_clone_retain(paxos_entry_t* dst, const paxos_entry_t* src) {
     *dst = *src;
     paxos_payload_retain(dst->data);
@@ -37,7 +33,6 @@ void paxos_rebuild_config(paxos_t* p) {
         for (size_t o = 0; o < PAXOS_LOG_CHUNK_SIZE; o++) {
             paxos_log_slot_t* slot_data = &p->log_chunks[c]->slots[o];
 
-            // FAANG: Never rebuild config from accepted-but-not-chosen state!
             if (!slot_data->has_value || !slot_data->chosen) continue;
 
             paxos_entry_t* e = &slot_data->entry;
@@ -63,28 +58,19 @@ void paxos_rebuild_config(paxos_t* p) {
 }
 
 bool paxos_log_accept(paxos_t* p, uint64_t slot, uint64_t ballot, entry_type_t type, uint64_t cid, uint64_t cseq, const uint8_t* data, size_t data_len) {
-    if (p->fatal_error || slot <= p->snapshot_index) return false;
+    if (p->fatal_error || slot <= p->snapshot_index || slot < p->log_base_slot) return false;
     if (data_len > PAXOS_MAX_PAYLOAD_SIZE) return false;
     if (data_len > 0 && !data) return false;
 
-    // FAANG: Allocate memory FIRST. If it fails, the node state remains perfectly intact.
-    uint8_t* new_payload = NULL;
-    if (data_len > 0) {
-        new_payload = paxos_payload_alloc(data, data_len);
-        if (!new_payload) {
-            p->fatal_error = true;
-            return false;
-        }
-    }
-
-    uint64_t c_idx = slot / PAXOS_LOG_CHUNK_SIZE;
-    uint64_t c_off = slot % PAXOS_LOG_CHUNK_SIZE;
+    // FAANG: Safe Relative Chunk Indexing (Fixes high sparse slot array explosion)
+    uint64_t rel_slot = slot - p->log_base_slot;
+    uint64_t c_idx = rel_slot / PAXOS_LOG_CHUNK_SIZE;
+    uint64_t c_off = rel_slot % PAXOS_LOG_CHUNK_SIZE;
 
     if (c_idx >= p->log_chunks_cap) {
         size_t new_cap = c_idx + 128;
         paxos_log_chunk_t** new_chunks = realloc(p->log_chunks, new_cap * sizeof(paxos_log_chunk_t*));
         if (!new_chunks) {
-            if (new_payload) paxos_payload_release(new_payload);
             p->fatal_error = true;
             return false;
         }
@@ -96,7 +82,6 @@ bool paxos_log_accept(paxos_t* p, uint64_t slot, uint64_t ballot, entry_type_t t
     if (!p->log_chunks[c_idx]) {
         p->log_chunks[c_idx] = calloc(1, sizeof(paxos_log_chunk_t));
         if (!p->log_chunks[c_idx]) {
-            if (new_payload) paxos_payload_release(new_payload);
             p->fatal_error = true;
             return false;
         }
@@ -104,9 +89,27 @@ bool paxos_log_accept(paxos_t* p, uint64_t slot, uint64_t ballot, entry_type_t t
 
     paxos_log_slot_t* slot_data = &p->log_chunks[c_idx]->slots[c_off];
 
-    // Transactionally swap the state
+    // FAANG: Preserve Chosen State. If already chosen, a re-accept MUST perfectly match data to be valid.
+    bool was_chosen = slot_data->chosen;
     paxos_entry_t old_entry = slot_data->entry;
     bool had_value = slot_data->has_value;
+
+    if (had_value && was_chosen) {
+        paxos_entry_t temp_in = { .type = type, .client_id = cid, .client_seq = cseq, .data = (uint8_t*)data, .data_len = data_len };
+        if (!paxos_entry_value_equal(&old_entry, &temp_in)) {
+            p->fatal_error = true;
+            return false;
+        }
+    }
+
+    uint8_t* new_payload = NULL;
+    if (data_len > 0) {
+        new_payload = paxos_payload_alloc(data, data_len);
+        if (!new_payload) {
+            p->fatal_error = true;
+            return false;
+        }
+    }
 
     slot_data->entry.slot = slot;
     slot_data->entry.accepted_ballot = ballot;
@@ -118,23 +121,21 @@ bool paxos_log_accept(paxos_t* p, uint64_t slot, uint64_t ballot, entry_type_t t
 
     slot_data->has_value = true;
     slot_data->unstable = true;
-    slot_data->chosen = false;
+    slot_data->chosen = was_chosen; // Retain chosen state
 
     if (had_value) {
         paxos_entry_destroy(&old_entry);
     }
 
-    if (type >= ENTRY_CONF_ADD && type <= ENTRY_CONF_FINAL) {
-        if (slot > p->highest_config_slot) p->highest_config_slot = slot;
-    }
-
+    // Config entries are safely handled strictly on rebuild pass now
     return true;
 }
 
 paxos_entry_t* paxos_log_get(paxos_t* p, uint64_t slot) {
     if (slot <= p->snapshot_index || slot < p->log_base_slot) return NULL;
-    uint64_t c_idx = slot / PAXOS_LOG_CHUNK_SIZE;
-    uint64_t c_off = slot % PAXOS_LOG_CHUNK_SIZE;
+    uint64_t rel_slot = slot - p->log_base_slot;
+    uint64_t c_idx = rel_slot / PAXOS_LOG_CHUNK_SIZE;
+    uint64_t c_off = rel_slot % PAXOS_LOG_CHUNK_SIZE;
     if (c_idx >= p->log_chunks_cap || !p->log_chunks[c_idx] || !p->log_chunks[c_idx]->slots[c_off].has_value) return NULL;
     return &p->log_chunks[c_idx]->slots[c_off].entry;
 }
@@ -171,7 +172,8 @@ paxos_entry_t* paxos_log_extract_unstable(paxos_t* p, size_t* out_count) {
 paxos_entry_t* paxos_log_extract_suffix(paxos_t* p, uint64_t start_slot, size_t* out_count) {
     *out_count = 0;
     if (start_slot < p->log_base_slot) start_slot = p->log_base_slot;
-    uint64_t start_c = start_slot / PAXOS_LOG_CHUNK_SIZE;
+    uint64_t rel_slot = start_slot - p->log_base_slot;
+    uint64_t start_c = rel_slot / PAXOS_LOG_CHUNK_SIZE;
 
     size_t count = 0;
     for (size_t c = start_c; c < p->log_chunks_cap; c++) {
@@ -205,8 +207,10 @@ paxos_entry_t* paxos_log_extract_range(paxos_t* p, uint64_t start_slot, uint64_t
     if (start_slot < p->log_base_slot) start_slot = p->log_base_slot;
     if (end_slot < start_slot) return NULL;
 
-    uint64_t start_c = start_slot / PAXOS_LOG_CHUNK_SIZE;
-    uint64_t end_c = end_slot / PAXOS_LOG_CHUNK_SIZE;
+    uint64_t rel_start = start_slot - p->log_base_slot;
+    uint64_t rel_end = end_slot - p->log_base_slot;
+    uint64_t start_c = rel_start / PAXOS_LOG_CHUNK_SIZE;
+    uint64_t end_c = rel_end / PAXOS_LOG_CHUNK_SIZE;
     if (end_c >= p->log_chunks_cap) end_c = p->log_chunks_cap - 1;
 
     size_t count = 0;
@@ -239,19 +243,18 @@ paxos_entry_t* paxos_log_extract_range(paxos_t* p, uint64_t start_slot, uint64_t
 void paxos_advance_local_commit(paxos_t* p, uint64_t author_id, uint64_t author_ballot) {
     while (p->local_commit_index < p->leader_commit_hint) {
         uint64_t check_slot = p->local_commit_index + 1;
-        uint64_t c_idx = check_slot / PAXOS_LOG_CHUNK_SIZE;
-        uint64_t c_off = check_slot % PAXOS_LOG_CHUNK_SIZE;
+        if (check_slot < p->log_base_slot) break;
+
+        uint64_t rel_slot = check_slot - p->log_base_slot;
+        uint64_t c_idx = rel_slot / PAXOS_LOG_CHUNK_SIZE;
+        uint64_t c_off = rel_slot % PAXOS_LOG_CHUNK_SIZE;
 
         if (c_idx >= p->log_chunks_cap || !p->log_chunks[c_idx] || !p->log_chunks[c_idx]->slots[c_off].has_value) break;
 
         paxos_log_slot_t* slot_data = &p->log_chunks[c_idx]->slots[c_off];
 
-        // FAANG: Extremely strict validation. Only trust a commit hint if it comes from the current leader
-        // AND the ballot of the local data perfectly matches the leader's active ballot.
         if (author_id == p->leader_id && author_ballot == p->promised_ballot && slot_data->entry.accepted_ballot == author_ballot) {
             slot_data->chosen = true;
-
-            // Rebuild config ONLY when a config entry is explicitly marked chosen
             if (slot_data->entry.type >= ENTRY_CONF_ADD && slot_data->entry.type <= ENTRY_CONF_FINAL) {
                 paxos_rebuild_config(p);
             }
@@ -270,9 +273,11 @@ void paxos_advance_local_commit(paxos_t* p, uint64_t author_id, uint64_t author_
 }
 
 void paxos_compact(paxos_t* p, uint64_t compact_slot) {
-    if (p->fatal_error || compact_slot <= p->snapshot_index || compact_slot > p->last_applied) return;
+    if (p->fatal_error || compact_slot <= p->snapshot_index || compact_slot > p->last_applied || compact_slot < p->log_base_slot) return;
 
-    uint64_t end_c = compact_slot / PAXOS_LOG_CHUNK_SIZE;
+    uint64_t rel_compact = compact_slot - p->log_base_slot;
+    uint64_t end_c = rel_compact / PAXOS_LOG_CHUNK_SIZE;
+
     for (size_t c = 0; c <= end_c && c < p->log_chunks_cap; c++) {
         if (!p->log_chunks[c]) continue;
         for (size_t o = 0; o < PAXOS_LOG_CHUNK_SIZE; o++) {
