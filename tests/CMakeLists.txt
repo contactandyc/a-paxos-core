@@ -292,6 +292,55 @@ endif()
 
 add_test(NAME test_paxos_crash_lifecycle COMMAND $<TARGET_FILE:test_paxos_crash_lifecycle>)
 # ==============================================================================
+# test_paxos_final_review Target (Standard Test)
+# ==============================================================================
+add_executable(test_paxos_final_review
+  src/test_paxos_final_review.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_acceptor.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_core.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_log.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_proposer.c
+)
+
+target_include_directories(test_paxos_final_review BEFORE PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../src
+  ${CMAKE_CURRENT_SOURCE_DIR}/../include
+)
+
+list(APPEND TEST_EXECUTABLES test_paxos_final_review)
+
+set_target_properties(test_paxos_final_review PROPERTIES
+  C_STANDARD 23
+  C_STANDARD_REQUIRED YES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+)
+
+target_link_libraries(test_paxos_final_review PRIVATE the_macro_library::the_macro_library)
+target_link_libraries(test_paxos_final_review PRIVATE a_paxos_core::a_paxos_core)
+
+if(M_LIB)
+  target_link_libraries(test_paxos_final_review PRIVATE ${M_LIB})
+endif()
+
+if(MSVC)
+  target_compile_options(test_paxos_final_review PRIVATE /W4 ${TEST_COMPILER_OPTS})
+else()
+  target_compile_options(test_paxos_final_review PRIVATE -Wall -Wextra -Wpedantic ${TEST_COMPILER_OPTS})
+endif()
+
+if(A_ENABLE_COVERAGE)
+  if (CMAKE_C_COMPILER_ID MATCHES "Clang")
+    target_compile_options(test_paxos_final_review PRIVATE -O0 -g -fprofile-instr-generate -fcoverage-mapping)
+    target_link_options(test_paxos_final_review PRIVATE -fprofile-instr-generate -fcoverage-mapping)
+  elseif (CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(test_paxos_final_review PRIVATE -O0 -g --coverage)
+    target_link_options(test_paxos_final_review PRIVATE --coverage)
+  endif()
+endif()
+
+add_test(NAME test_paxos_final_review COMMAND $<TARGET_FILE:test_paxos_final_review>)
+# ==============================================================================
 # test_paxos_firewall Target (Standard Test)
 # ==============================================================================
 add_executable(test_paxos_firewall
@@ -340,6 +389,55 @@ if(A_ENABLE_COVERAGE)
 endif()
 
 add_test(NAME test_paxos_firewall COMMAND $<TARGET_FILE:test_paxos_firewall>)
+# ==============================================================================
+# test_paxos_joint_consensus Target (Standard Test)
+# ==============================================================================
+add_executable(test_paxos_joint_consensus
+  src/test_paxos_joint_consensus.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_acceptor.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_core.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_log.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_proposer.c
+)
+
+target_include_directories(test_paxos_joint_consensus BEFORE PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../src
+  ${CMAKE_CURRENT_SOURCE_DIR}/../include
+)
+
+list(APPEND TEST_EXECUTABLES test_paxos_joint_consensus)
+
+set_target_properties(test_paxos_joint_consensus PROPERTIES
+  C_STANDARD 23
+  C_STANDARD_REQUIRED YES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+)
+
+target_link_libraries(test_paxos_joint_consensus PRIVATE the_macro_library::the_macro_library)
+target_link_libraries(test_paxos_joint_consensus PRIVATE a_paxos_core::a_paxos_core)
+
+if(M_LIB)
+  target_link_libraries(test_paxos_joint_consensus PRIVATE ${M_LIB})
+endif()
+
+if(MSVC)
+  target_compile_options(test_paxos_joint_consensus PRIVATE /W4 ${TEST_COMPILER_OPTS})
+else()
+  target_compile_options(test_paxos_joint_consensus PRIVATE -Wall -Wextra -Wpedantic ${TEST_COMPILER_OPTS})
+endif()
+
+if(A_ENABLE_COVERAGE)
+  if (CMAKE_C_COMPILER_ID MATCHES "Clang")
+    target_compile_options(test_paxos_joint_consensus PRIVATE -O0 -g -fprofile-instr-generate -fcoverage-mapping)
+    target_link_options(test_paxos_joint_consensus PRIVATE -fprofile-instr-generate -fcoverage-mapping)
+  elseif (CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(test_paxos_joint_consensus PRIVATE -O0 -g --coverage)
+    target_link_options(test_paxos_joint_consensus PRIVATE --coverage)
+  endif()
+endif()
+
+add_test(NAME test_paxos_joint_consensus COMMAND $<TARGET_FILE:test_paxos_joint_consensus>)
 # ==============================================================================
 # test_paxos_memory Target (Standard Test)
 # ==============================================================================

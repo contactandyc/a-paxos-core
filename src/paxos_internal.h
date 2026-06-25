@@ -17,8 +17,8 @@
 #define INFLIGHT_WINDOW 4096
 #define MAX_RECOVERY_GAP 100000
 
-// FAANG: Fully sandbox the unfinished Joint-Consensus logic
-#define PAXOS_ENABLE_RECONFIG 0
+// FAANG: The locks are off. Dynamic Topology is live.
+#define PAXOS_ENABLE_RECONFIG 1
 
 typedef struct {
     _Atomic uint32_t ref_count;
@@ -95,6 +95,10 @@ struct paxos_s {
     uint64_t active_config_mask;
     uint64_t joint_config_mask;
     bool in_joint_consensus;
+    bool pending_reconfig;
+
+    // FAANG: Trigger flag for Phase 2 of Joint Consensus
+    bool needs_conf_final;
 
     uint64_t promised_ballot;
     uint64_t max_generated_ballot;
@@ -103,9 +107,11 @@ struct paxos_s {
     paxos_log_chunk_t** log_chunks;
     size_t log_chunks_cap;
     uint64_t log_base_slot;
-
-    // FAANG: O(1) Tail lookup speed optimization
     uint64_t highest_slot;
+
+    uint64_t* unstable_slots;
+    size_t num_unstable_slots;
+    size_t unstable_slots_cap;
 
     uint64_t stable_accepted_through;
     uint64_t leader_commit_hint;
@@ -199,6 +205,7 @@ static inline bool paxos_has_quorum(paxos_t* p, uint64_t ack_mask) {
     int active_req = (__builtin_popcountll(p->active_config_mask) / 2) + 1;
     if (active_acks < active_req) return false;
 
+    // FAANG: The core of Joint Consensus. Requires a secondary overlapping majority!
     if (p->in_joint_consensus) {
         int joint_acks = __builtin_popcountll(ack_mask & p->joint_config_mask);
         int joint_req = (__builtin_popcountll(p->joint_config_mask) / 2) + 1;

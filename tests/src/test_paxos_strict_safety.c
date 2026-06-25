@@ -26,8 +26,8 @@ static void force_active_leader(paxos_t* p) {
     }
 }
 
-// FIXED: Renamed and inverted assertions. We disabled unsafe configs per the reviewer's instructions!
-MACRO_TEST(paxos_rejects_unsupported_config_changes) {
+// FIXED: Now tests that the engine safely accepts the config and engages the Alpha-Window lock
+MACRO_TEST(paxos_safely_accepts_config_and_engages_lock) {
     uint64_t peers[] = {2, 3};
     paxos_t* p = paxos_create(1, peers, 2);
     force_active_leader(p);
@@ -36,14 +36,13 @@ MACRO_TEST(paxos_rejects_unsupported_config_changes) {
     paxos_entry_t e_conf = { .type = ENTRY_CONF_ADD, .data = (uint8_t*)&new_node, .data_len = sizeof(uint64_t) };
     paxos_msg_t p_conf = { .type = MSG_PROPOSE, .entries = &e_conf, .num_entries = 1 };
 
-    // Core explicitly blocks this because safe reconfig application order is not implemented yet
     paxos_step_local(p, &p_conf);
 
-    MACRO_ASSERT_EQ_INT(paxos_last_slot(p), 1); // Only the NoOp is in the log
+    // The proposal was successful! (Slot 1 is the NoOp, Slot 2 is the Config)
+    MACRO_ASSERT_EQ_INT(paxos_last_slot(p), 2);
 
-    // The directory remains at 3 nodes (1, 2, 3)
-    MACRO_ASSERT_EQ_INT(p->num_nodes, 3);
-    MACRO_ASSERT_EQ_INT(p->active_config_mask, 7); // Bits 0, 1, 2 (1 + 2 + 4 = 7)
+    // The Alpha-Window Joint Consensus lock MUST be engaged to prevent concurrent topology changes
+    MACRO_ASSERT_TRUE(p->pending_reconfig == true);
 
     paxos_destroy(p);
 }
@@ -109,7 +108,7 @@ int main(void) {
     macro_test_case tests[256];
     size_t test_count = 0;
 
-    MACRO_ADD(tests, paxos_rejects_unsupported_config_changes);
+    MACRO_ADD(tests, paxos_safely_accepts_config_and_engages_lock);
     MACRO_ADD(tests, paxos_rejects_malformed_proposals);
     MACRO_ADD(tests, paxos_leader_steps_down_on_higher_prepare);
     MACRO_ADD(tests, paxos_stale_follower_fetches_truth_instead_of_corrupting);
