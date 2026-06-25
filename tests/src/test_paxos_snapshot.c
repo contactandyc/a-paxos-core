@@ -39,18 +39,23 @@ MACRO_TEST(leader_rejects_fetch_entries_with_snapshot_install) {
     p->active_ballot = 5;
     p->snapshot_index = 100; // Leader has already compacted the first 100 slots
 
-    // Follower asks for slot 50
-    paxos_msg_t fetch = { .type = MSG_FETCH_ENTRIES, .to = 1, .from = 2, .slot = 50, .commit_index = 105 };
+    // FIXED: Added .ballot to pass the validation firewall
+    paxos_msg_t fetch = {
+        .type = MSG_FETCH_ENTRIES,
+        .to = 1,
+        .from = 2,
+        .ballot = 5,
+        .slot = 50,
+        .commit_index = 105
+    };
     paxos_step_remote(p, &fetch);
 
     paxos_ready_t ready = paxos_get_ready(p);
 
-    // Leader MUST NOT return FETCH_ENTRIES_RES with reject=true.
-    // It MUST immediately kick off the streaming SNAPSHOT logic to rescue the offline node!
     MACRO_ASSERT_EQ_INT(ready.num_messages_immediate, 1);
     MACRO_ASSERT_TRUE(ready.messages_immediate[0].type == MSG_INSTALL_SNAPSHOT);
-    MACRO_ASSERT_EQ_INT(ready.messages_immediate[0].slot, 100); // Snapshot horizon
-    MACRO_ASSERT_EQ_INT(ready.messages_immediate[0].snapshot_offset, 0); // Start of stream
+    MACRO_ASSERT_EQ_INT(ready.messages_immediate[0].slot, 100);
+    MACRO_ASSERT_EQ_INT(ready.messages_immediate[0].snapshot_offset, 0);
 
     paxos_ready_destroy(&ready);
     paxos_destroy(p);

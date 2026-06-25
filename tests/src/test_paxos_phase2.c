@@ -114,7 +114,14 @@ MACRO_TEST(paxos_leader_steps_down_on_nack) {
     MACRO_ASSERT_EQ_INT(paxos_state(p), PAXOS_STATE_ACTIVE);
 
     uint64_t higher_ballot = p->active_ballot + 10;
-    paxos_msg_t nack = { .type = MSG_NACK, .to = 1, .from = 3, .promised_ballot = higher_ballot };
+    // FIXED: Added .ballot to pass the validation firewall
+    paxos_msg_t nack = {
+        .type = MSG_NACK,
+        .to = 1,
+        .from = 3,
+        .ballot = p->active_ballot,
+        .promised_ballot = higher_ballot
+    };
     paxos_step_remote(p, &nack);
 
     MACRO_ASSERT_EQ_INT(paxos_state(p), PAXOS_STATE_LEARNER);
@@ -123,6 +130,7 @@ MACRO_TEST(paxos_leader_steps_down_on_nack) {
 
     paxos_destroy(p);
 }
+
 
 MACRO_TEST(paxos_acceptor_updates_commit_index_from_piggyback) {
     uint64_t peers[] = {2, 3};

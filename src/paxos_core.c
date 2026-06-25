@@ -34,6 +34,39 @@ paxos_t* paxos_create(uint64_t id, uint64_t* peers, size_t num_peers) {
     return p;
 }
 
+paxos_t* paxos_restore(uint64_t id, uint64_t* peers, size_t num_peers,
+                       paxos_hard_state_t hard_state,
+                       uint64_t local_commit_index, uint64_t snapshot_index,
+                       paxos_entry_t* entries, size_t num_entries) {
+    paxos_t* p = paxos_create(id, peers, num_peers);
+    if (!p) return NULL;
+
+    p->promised_ballot = hard_state.promised_ballot;
+    p->max_generated_ballot = hard_state.max_generated_ballot;
+    p->prev_hard_state = hard_state;
+
+    p->snapshot_index = snapshot_index;
+    p->local_commit_index = local_commit_index;
+    p->leader_commit_hint = local_commit_index;
+    p->last_applied = local_commit_index;
+    p->stable_accepted_through = snapshot_index;
+
+    p->log_base_slot = snapshot_index + 1;
+
+    for (size_t i = 0; i < num_entries; i++) {
+        paxos_entry_t* e = &entries[i];
+        if (!paxos_log_accept(p, e->slot, e->accepted_ballot, e->type, e->client_id, e->client_seq, e->data, e->data_len)) {
+            paxos_destroy(p);
+            return NULL;
+        }
+        if (e->slot > p->stable_accepted_through) {
+            p->stable_accepted_through = e->slot;
+        }
+    }
+
+    return p;
+}
+
 void paxos_destroy(paxos_t* p) {
     if (!p) return;
 
@@ -92,8 +125,32 @@ void paxos_send_after_persist(paxos_t* p, paxos_msg_t msg) {
     p->msg_queue_after_persist[p->msg_queue_after_persist_len++] = msg;
 }
 
+static bool paxos_msg_is_valid(paxos_msg_t* msg) {
+    if (msg->type == MSG_PROPOSE) {
+        if (msg->num_entries == 0 || !msg->entries) return false;
+        if (msg->entries[0].data_len > PAXOS_MAX_PAYLOAD_SIZE) return false;
+        return true;
+    }
+
+    if (msg->ballot == 0 && msg->type != MSG_READ_BARRIER) return false;
+
+    if (msg->type == MSG_PROMISE || msg->type == MSG_FETCH_ENTRIES_RES) {
+        if (msg->num_entries > 0 && !msg->entries) return false;
+        for (size_t i = 0; i < msg->num_entries; i++) {
+            if (msg->entries[i].data_len > PAXOS_MAX_PAYLOAD_SIZE) return false;
+        }
+    }
+
+    if (msg->type == MSG_ACCEPT) {
+        if (msg->num_entries != 1 || !msg->entries) return false;
+        if (msg->entries[0].data_len > PAXOS_MAX_PAYLOAD_SIZE) return false;
+    }
+
+    return true;
+}
+
 void paxos_step_local(paxos_t* p, paxos_msg_t* msg) {
-    if (p->fatal_error) return;
+    if (p->fatal_error || !paxos_msg_is_valid(msg)) return;
 
     if (msg->type == MSG_PROPOSE) {
         if (p->state != PAXOS_STATE_ACTIVE) return;
@@ -134,7 +191,7 @@ void paxos_step_local(paxos_t* p, paxos_msg_t* msg) {
 }
 
 void paxos_step_remote(paxos_t* p, paxos_msg_t* msg) {
-    if (p->fatal_error || msg->to != p->id) return;
+    if (p->fatal_error || msg->to != p->id || !paxos_msg_is_valid(msg)) return;
     switch (msg->type) {
         case MSG_PREPARE: case MSG_ACCEPT: case MSG_COMMIT_NOTICE: case MSG_FETCH_ENTRIES_RES: case MSG_INSTALL_SNAPSHOT: case MSG_READ_BARRIER:
             paxos_acceptor_step(p, msg); break;

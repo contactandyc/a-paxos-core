@@ -125,6 +125,12 @@ typedef struct {
 typedef struct paxos_s paxos_t;
 
 paxos_t* paxos_create(uint64_t id, uint64_t* peers, size_t num_peers);
+
+paxos_t* paxos_restore(uint64_t id, uint64_t* peers, size_t num_peers,
+                       paxos_hard_state_t hard_state,
+                       uint64_t local_commit_index, uint64_t snapshot_index,
+                       paxos_entry_t* entries, size_t num_entries);
+
 void     paxos_destroy(paxos_t* p);
 
 void          paxos_step_local(paxos_t* p, paxos_msg_t* msg);
