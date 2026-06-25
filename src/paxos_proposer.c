@@ -1,7 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
-//
-// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #include "paxos_internal.h"
 #include <string.h>
@@ -30,6 +28,36 @@ static void merge_into_recovery(paxos_t* p, paxos_entry_t* e) {
         r_slot->highest_ballot_seen = e->accepted_ballot;
         r_slot->has_value = true;
         paxos_entry_clone(&r_slot->recovered_value, e);
+    }
+}
+
+// NEW: Helper function to transition to Active state once quorum is met
+static void check_promise_quorum_and_activate(paxos_t* p) {
+    if (has_quorum(p, p->promises_received)) {
+        p->state = PAXOS_STATE_RECOVERING_PHASE2;
+        p->leader_id = p->id;
+
+        for (uint64_t s = p->local_commit_index + 1; s <= p->recovery_max_slot; s++) {
+            paxos_recovery_slot_t* r_slot = &p->recovery_buffer[s];
+            paxos_entry_t final_val = {0};
+            if (r_slot->has_value) {
+                final_val = r_slot->recovered_value;
+            } else {
+                final_val.type = ENTRY_NOOP;
+                final_val.data_len = 0;
+            }
+
+            paxos_log_accept(p, s, p->active_ballot, final_val.type, final_val.client_id, final_val.client_seq, final_val.data, final_val.data_len);
+
+            paxos_msg_t acc = { .type = MSG_ACCEPT, .ballot = p->active_ballot, .slot = s, .commit_index = p->local_commit_index, .entries = paxos_log_get(p, s), .num_entries = 1 };
+            for(size_t j = 0; j < p->num_peers; j++) {
+                acc.to = p->peers[j];
+                paxos_send_after_persist(p, acc);
+            }
+        }
+        p->next_slot = p->recovery_max_slot + 1;
+
+        if (p->local_commit_index >= p->recovery_max_slot) p->state = PAXOS_STATE_ACTIVE;
     }
 }
 
@@ -74,6 +102,82 @@ void paxos_proposer_campaign(paxos_t* p) {
         paxos_msg_t req = { .type = MSG_PREPARE, .to = p->peers[i], .ballot = p->active_ballot, .slot = p->local_commit_index + 1 };
         paxos_send_after_persist(p, req);
     }
+
+    // FIXED: Immediately check if we have a quorum (crucial for 1-node clusters!)
+    check_promise_quorum_and_activate(p);
+}
+
+void paxos_proposer_read_barrier_local(paxos_t* p, paxos_msg_t* msg) {
+    if (p->state != PAXOS_STATE_ACTIVE) return;
+
+    uint64_t read_seq = ++p->current_read_seq;
+    paxos_pending_read_t* pr = NULL;
+    for (int i = 0; i < MAX_PENDING_READS; i++) {
+        if (!p->pending_reads[i].active) {
+            pr = &p->pending_reads[i];
+            break;
+        }
+    }
+    if (!pr) return;
+
+    pr->active = true;
+    pr->read_seq = read_seq;
+    pr->client_ctx = msg->read_seq;
+    pr->slot = p->local_commit_index;
+    pr->acks = 1;
+    memset(pr->acked_by, 0, sizeof(pr->acked_by));
+
+    if (has_quorum(p, pr->acks)) {
+        if (p->num_read_states >= p->read_states_cap) {
+            size_t new_cap = p->read_states_cap == 0 ? 16 : p->read_states_cap * 2;
+            paxos_read_state_t* new_rs = realloc(p->read_states, new_cap * sizeof(paxos_read_state_t));
+            if (!new_rs) { p->fatal_error = true; return; }
+            p->read_states = new_rs;
+            p->read_states_cap = new_cap;
+        }
+        p->read_states[p->num_read_states].read_seq = pr->client_ctx;
+        p->read_states[p->num_read_states].slot = pr->slot;
+        p->num_read_states++;
+        pr->active = false;
+    } else {
+        for (size_t i = 0; i < p->num_peers; i++) {
+            paxos_msg_t req = { .type = MSG_READ_BARRIER, .to = p->peers[i], .ballot = p->active_ballot, .read_seq = read_seq };
+            paxos_send_immediate(p, req);
+        }
+    }
+}
+
+static void handle_read_barrier_res(paxos_t* p, paxos_msg_t* msg) {
+    if (p->state != PAXOS_STATE_ACTIVE || msg->ballot != p->active_ballot) return;
+
+    size_t peer_idx = 0; bool found = false;
+    for (size_t i = 0; i < p->num_peers; i++) {
+        if (p->peers[i] == msg->from) { peer_idx = i; found = true; break; }
+    }
+    if (!found) return;
+
+    for (int i = 0; i < MAX_PENDING_READS; i++) {
+        paxos_pending_read_t* pr = &p->pending_reads[i];
+        if (pr->active && pr->read_seq == msg->read_seq && !pr->acked_by[peer_idx]) {
+            pr->acked_by[peer_idx] = true;
+            pr->acks++;
+
+            if (has_quorum(p, pr->acks)) {
+                if (p->num_read_states >= p->read_states_cap) {
+                    size_t new_cap = p->read_states_cap == 0 ? 16 : p->read_states_cap * 2;
+                    paxos_read_state_t* new_rs = realloc(p->read_states, new_cap * sizeof(paxos_read_state_t));
+                    if (!new_rs) { p->fatal_error = true; return; }
+                    p->read_states = new_rs;
+                    p->read_states_cap = new_cap;
+                }
+                p->read_states[p->num_read_states].read_seq = pr->client_ctx;
+                p->read_states[p->num_read_states].slot = pr->slot;
+                p->num_read_states++;
+                pr->active = false;
+            }
+            break;
+        }
+    }
 }
 
 static void handle_promise(paxos_t* p, paxos_msg_t* msg) {
@@ -90,32 +194,8 @@ static void handle_promise(paxos_t* p, paxos_msg_t* msg) {
 
     for (size_t i = 0; i < msg->num_entries; i++) merge_into_recovery(p, &msg->entries[i]);
 
-    if (has_quorum(p, p->promises_received)) {
-        p->state = PAXOS_STATE_RECOVERING_PHASE2;
-        p->leader_id = p->id;
-
-        for (uint64_t s = p->local_commit_index + 1; s <= p->recovery_max_slot; s++) {
-            paxos_recovery_slot_t* r_slot = &p->recovery_buffer[s];
-            paxos_entry_t final_val = {0};
-            if (r_slot->has_value) {
-                final_val = r_slot->recovered_value;
-            } else {
-                final_val.type = ENTRY_NOOP;
-                final_val.data_len = 0;
-            }
-
-            paxos_log_accept(p, s, p->active_ballot, final_val.type, final_val.client_id, final_val.client_seq, final_val.data, final_val.data_len);
-
-            paxos_msg_t acc = { .type = MSG_ACCEPT, .ballot = p->active_ballot, .slot = s, .commit_index = p->local_commit_index, .entries = paxos_log_get(p, s), .num_entries = 1 };
-            for(size_t j = 0; j < p->num_peers; j++) {
-                acc.to = p->peers[j];
-                paxos_send_after_persist(p, acc);
-            }
-        }
-        p->next_slot = p->recovery_max_slot + 1;
-
-        if (p->local_commit_index >= p->recovery_max_slot) p->state = PAXOS_STATE_ACTIVE;
-    }
+    // FIXED: Replaced duplicate code with helper
+    check_promise_quorum_and_activate(p);
 }
 
 static void handle_accepted(paxos_t* p, paxos_msg_t* msg) {
@@ -164,7 +244,6 @@ static void handle_fetch_entries(paxos_t* p, paxos_msg_t* msg) {
 
     paxos_msg_t res = { .type = MSG_FETCH_ENTRIES_RES, .to = msg->from, .reject = false };
 
-    // NEW: If the learner asked for data we already compacted, trigger a snapshot push!
     if (msg->slot <= p->snapshot_index) {
         size_t peer_idx = 0;
         for (size_t i = 0; i < p->num_peers; i++) {
@@ -175,8 +254,8 @@ static void handle_fetch_entries(paxos_t* p, paxos_msg_t* msg) {
             .type = MSG_INSTALL_SNAPSHOT,
             .to = msg->from,
             .ballot = p->active_ballot,
-            .slot = p->snapshot_index, // Metadata describing the snapshot's state horizon
-            .snapshot_offset = p->snapshot_offset[peer_idx] // Where this follower left off reading the file
+            .slot = p->snapshot_index,
+            .snapshot_offset = p->snapshot_offset[peer_idx]
         };
         paxos_send_immediate(p, snap);
         return;
@@ -189,7 +268,6 @@ static void handle_fetch_entries(paxos_t* p, paxos_msg_t* msg) {
     paxos_send_after_persist(p, res);
 }
 
-// NEW: Follower responds to our snapshot chunk
 static void handle_install_snapshot_res(paxos_t* p, paxos_msg_t* msg) {
     if (p->state != PAXOS_STATE_ACTIVE || msg->ballot != p->active_ballot) return;
 
@@ -200,16 +278,12 @@ static void handle_install_snapshot_res(paxos_t* p, paxos_msg_t* msg) {
     if (!found) return;
 
     if (msg->reject) {
-        p->snapshot_offset[peer_idx] = msg->slot; // The follower requested a backtrack due to failure/mismatch
+        p->snapshot_offset[peer_idx] = msg->slot;
     } else {
-        if (msg->snapshot_done) {
-            p->snapshot_offset[peer_idx] = 0; // Stream complete!
-        } else {
-            p->snapshot_offset[peer_idx] = msg->slot; // Stream progress advanced!
-        }
+        if (msg->snapshot_done) p->snapshot_offset[peer_idx] = 0;
+        else p->snapshot_offset[peer_idx] = msg->slot;
     }
 
-    // Trigger the next chunk request (Host app reads file at offset and populates payload)
     if (!msg->snapshot_done) {
         paxos_msg_t snap = {
             .type = MSG_INSTALL_SNAPSHOT,
@@ -238,7 +312,8 @@ void paxos_proposer_step(paxos_t* p, paxos_msg_t* msg) {
         case MSG_ACCEPTED: handle_accepted(p, msg); break;
         case MSG_NACK: handle_nack(p, msg); break;
         case MSG_FETCH_ENTRIES: handle_fetch_entries(p, msg); break;
-        case MSG_INSTALL_SNAPSHOT_RES: handle_install_snapshot_res(p, msg); break; // <-- NEW
+        case MSG_INSTALL_SNAPSHOT_RES: handle_install_snapshot_res(p, msg); break;
+        case MSG_READ_BARRIER_RES: handle_read_barrier_res(p, msg); break;
         default: break;
     }
 }

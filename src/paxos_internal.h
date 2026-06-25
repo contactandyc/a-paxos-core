@@ -10,6 +10,7 @@
 
 #define MAX_PEERS 64
 #define MAX_REMOTE_PEERS (MAX_PEERS - 1)
+#define MAX_PENDING_READS 128
 
 typedef struct {
     bool has_value;
@@ -31,6 +32,16 @@ typedef struct {
     bool active;
 } paxos_inflight_slot_t;
 
+// NEW: Tracking in-flight quorum reads
+typedef struct {
+    uint64_t read_seq;
+    uint64_t client_ctx;
+    uint64_t slot;
+    size_t acks;
+    bool acked_by[MAX_PEERS];
+    bool active;
+} paxos_pending_read_t;
+
 struct paxos_s {
     uint64_t id;
     paxos_state_t state;
@@ -48,7 +59,6 @@ struct paxos_s {
     uint64_t local_commit_index;
     uint64_t last_applied;
 
-    // Snapshot state
     uint64_t snapshot_index;
     uint64_t snapshot_ballot;
 
@@ -78,10 +88,8 @@ struct paxos_s {
     size_t msg_queue_after_persist_cap;
     size_t msg_queue_after_persist_len;
 
-    // Leader: Stream tracking per follower
     uint64_t snapshot_offset[MAX_PEERS];
 
-    // Follower: Incoming chunk tracking
     bool pending_snapshot;
     uint8_t* pending_snapshot_data;
     size_t pending_snapshot_len;
@@ -92,6 +100,13 @@ struct paxos_s {
     uint64_t pending_snapshot_msg_ballot;
     uint64_t expected_snapshot_offset;
     bool pending_snapshot_chunk_ready;
+
+    // NEW: Read barrier tracking
+    paxos_pending_read_t pending_reads[MAX_PENDING_READS];
+    uint64_t current_read_seq;
+    paxos_read_state_t* read_states;
+    size_t read_states_cap;
+    size_t num_read_states;
 
     bool fatal_error;
 };
@@ -110,5 +125,6 @@ void paxos_advance_local_commit(paxos_t* p);
 
 void paxos_acceptor_step(paxos_t* p, paxos_msg_t* msg);
 void paxos_proposer_step(paxos_t* p, paxos_msg_t* msg);
+void paxos_proposer_read_barrier_local(paxos_t* p, paxos_msg_t* msg); // <-- NEW
 
 #endif // PAXOS_INTERNAL_H

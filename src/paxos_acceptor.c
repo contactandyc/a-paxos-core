@@ -36,7 +36,6 @@ static void handle_fetch_entries_res(paxos_t* p, paxos_msg_t* msg) {
     check_and_fetch_gaps(p);
 }
 
-// NEW: Safely accept heavy binary state chunks from the Leader
 static void handle_install_snapshot(paxos_t* p, paxos_msg_t* msg) {
     if (msg->ballot > p->last_observed_ballot) p->last_observed_ballot = msg->ballot;
     if (msg->ballot < p->promised_ballot) {
@@ -48,14 +47,12 @@ static void handle_install_snapshot(paxos_t* p, paxos_msg_t* msg) {
     p->leader_id = msg->from;
 
     if (msg->slot <= p->last_applied) {
-        // Fast-Ack if we already hold this snapshot
         paxos_msg_t res = { .type = MSG_INSTALL_SNAPSHOT_RES, .to = msg->from, .reject = false, .slot = msg->slot, .snapshot_done = true };
         paxos_send_immediate(p, res);
         return;
     }
 
     if (msg->slot > p->snapshot_index) {
-        // Yield Backpressure if host application is still processing the last chunk
         if (p->pending_snapshot_chunk_ready) {
             paxos_msg_t res = { .type = MSG_INSTALL_SNAPSHOT_RES, .to = msg->from, .reject = true, .slot = p->expected_snapshot_offset - p->pending_snapshot_len };
             paxos_send_immediate(p, res);
@@ -75,7 +72,6 @@ static void handle_install_snapshot(paxos_t* p, paxos_msg_t* msg) {
             p->pending_snapshot_msg_slot = msg->slot;
             p->pending_snapshot_msg_ballot = msg->ballot;
         } else if (!p->pending_snapshot || msg->snapshot_offset != p->expected_snapshot_offset) {
-            // Mismatched offset, tell leader exactly where to resend from
             paxos_msg_t res = { .type = MSG_INSTALL_SNAPSHOT_RES, .to = msg->from, .reject = true, .slot = p->expected_snapshot_offset };
             paxos_send_immediate(p, res);
             return;
@@ -100,6 +96,25 @@ static void handle_install_snapshot(paxos_t* p, paxos_msg_t* msg) {
         paxos_msg_t res = { .type = MSG_INSTALL_SNAPSHOT_RES, .to = msg->from, .reject = false, .slot = msg->slot };
         paxos_send_immediate(p, res);
     }
+}
+
+// NEW: Acceptor acknowledges the leader's read barrier ping
+static void handle_read_barrier(paxos_t* p, paxos_msg_t* msg) {
+    if (msg->ballot > p->last_observed_ballot) p->last_observed_ballot = msg->ballot;
+
+    if (msg->ballot < p->promised_ballot) {
+        reply_nack(p, msg);
+        return;
+    }
+    p->promised_ballot = msg->ballot;
+
+    paxos_msg_t res = {
+        .type = MSG_READ_BARRIER_RES,
+        .to = msg->from,
+        .ballot = msg->ballot,
+        .read_seq = msg->read_seq
+    };
+    paxos_send_immediate(p, res); // Safe to answer immediately
 }
 
 static void handle_prepare(paxos_t* p, paxos_msg_t* msg) {
@@ -190,7 +205,10 @@ void paxos_acceptor_step(paxos_t* p, paxos_msg_t* msg) {
             handle_fetch_entries_res(p, msg);
             break;
         case MSG_INSTALL_SNAPSHOT:
-            handle_install_snapshot(p, msg); // <-- NEW
+            handle_install_snapshot(p, msg);
+            break;
+        case MSG_READ_BARRIER:
+            handle_read_barrier(p, msg); // <-- NEW
             break;
         default:
             break;

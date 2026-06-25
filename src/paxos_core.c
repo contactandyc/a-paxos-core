@@ -63,6 +63,7 @@ void paxos_destroy(paxos_t* p) {
     }
 
     if (p->pending_snapshot_data) free(p->pending_snapshot_data);
+    if (p->read_states) free(p->read_states); // <-- NEW
 
     free(p);
 }
@@ -117,15 +118,17 @@ void paxos_step_local(paxos_t* p, paxos_msg_t* msg) {
             acc.to = p->peers[i];
             paxos_send_after_persist(p, acc);
         }
+    } else if (msg->type == MSG_READ_BARRIER) {
+        paxos_proposer_read_barrier_local(p, msg); // <-- NEW
     }
 }
 
 void paxos_step_remote(paxos_t* p, paxos_msg_t* msg) {
     if (p->fatal_error || msg->to != p->id) return;
     switch (msg->type) {
-        case MSG_PREPARE: case MSG_ACCEPT: case MSG_COMMIT_NOTICE: case MSG_FETCH_ENTRIES_RES: case MSG_INSTALL_SNAPSHOT:
+        case MSG_PREPARE: case MSG_ACCEPT: case MSG_COMMIT_NOTICE: case MSG_FETCH_ENTRIES_RES: case MSG_INSTALL_SNAPSHOT: case MSG_READ_BARRIER:
             paxos_acceptor_step(p, msg); break;
-        case MSG_PROMISE: case MSG_ACCEPTED: case MSG_NACK: case MSG_FETCH_ENTRIES: case MSG_INSTALL_SNAPSHOT_RES:
+        case MSG_PROMISE: case MSG_ACCEPTED: case MSG_NACK: case MSG_FETCH_ENTRIES: case MSG_INSTALL_SNAPSHOT_RES: case MSG_READ_BARRIER_RES:
             paxos_proposer_step(p, msg); break;
         default: break;
     }
@@ -148,6 +151,10 @@ paxos_ready_t paxos_get_ready(paxos_t* p) {
     ready.messages_after_persist = p->msg_queue_after_persist;
     ready.num_messages_after_persist = p->msg_queue_after_persist_len;
 
+    // NEW: Expose the read barriers that have gathered a quorum
+    ready.read_states = p->read_states;
+    ready.num_read_states = p->num_read_states;
+
     if (p->local_commit_index > p->last_applied) {
         size_t apply_count = p->local_commit_index - p->last_applied;
         ready.chosen_entries = calloc(apply_count, sizeof(paxos_entry_t));
@@ -165,7 +172,6 @@ paxos_ready_t paxos_get_ready(paxos_t* p) {
         }
     }
 
-    // NEW: Expose Snapshot Install Directives
     ready.install_snapshot = p->pending_snapshot_chunk_ready;
     ready.snapshot_slot = p->pending_snapshot_msg_slot;
     ready.snapshot_ballot = p->pending_snapshot_msg_ballot;
@@ -198,6 +204,7 @@ void paxos_advance(paxos_t* p, uint64_t stable_accepted_through, uint64_t applie
     p->prev_hard_state.max_generated_ballot = p->max_generated_ballot;
 
     p->msg_queue_immediate_len = 0;
+    p->num_read_states = 0; // <-- NEW: Safely clear extracted reads
 
     if (p->msg_queue_after_persist) {
         for (size_t i = 0; i < p->msg_queue_after_persist_len; i++) {
@@ -214,8 +221,6 @@ void paxos_advance(paxos_t* p, uint64_t stable_accepted_through, uint64_t applie
     p->msg_queue_after_persist_len = 0;
 }
 
-// NEW: When the Host completes fsync of the snapshot chunk, it calls this to clear the block
-// and inform the leader that it is ready for the next offset.
 void paxos_snapshot_acked(paxos_t* p, bool success) {
     if (!p->pending_snapshot) return;
 
