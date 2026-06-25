@@ -33,7 +33,6 @@ static void merge_into_recovery(paxos_t* p, paxos_entry_t* e) {
     }
 }
 
-// NEW: Helper function to transition to Active state once quorum is met
 static void check_promise_quorum_and_activate(paxos_t* p) {
     if (has_quorum(p, p->promises_received)) {
         p->state = PAXOS_STATE_RECOVERING_PHASE2;
@@ -105,7 +104,6 @@ void paxos_proposer_campaign(paxos_t* p) {
         paxos_send_after_persist(p, req);
     }
 
-    // FIXED: Immediately check if we have a quorum (crucial for 1-node clusters!)
     check_promise_quorum_and_activate(p);
 }
 
@@ -150,6 +148,7 @@ void paxos_proposer_read_barrier_local(paxos_t* p, paxos_msg_t* msg) {
 }
 
 static void handle_read_barrier_res(paxos_t* p, paxos_msg_t* msg) {
+    observe_higher_ballot(p, msg->ballot);
     if (p->state != PAXOS_STATE_ACTIVE || msg->ballot != p->active_ballot) return;
 
     size_t peer_idx = 0; bool found = false;
@@ -183,6 +182,7 @@ static void handle_read_barrier_res(paxos_t* p, paxos_msg_t* msg) {
 }
 
 static void handle_promise(paxos_t* p, paxos_msg_t* msg) {
+    observe_higher_ballot(p, msg->ballot);
     if (p->state != PAXOS_STATE_RECOVERING_PHASE1 || msg->ballot != p->active_ballot) return;
 
     size_t peer_idx = 0; bool found = false;
@@ -196,11 +196,11 @@ static void handle_promise(paxos_t* p, paxos_msg_t* msg) {
 
     for (size_t i = 0; i < msg->num_entries; i++) merge_into_recovery(p, &msg->entries[i]);
 
-    // FIXED: Replaced duplicate code with helper
     check_promise_quorum_and_activate(p);
 }
 
 static void handle_accepted(paxos_t* p, paxos_msg_t* msg) {
+    observe_higher_ballot(p, msg->ballot);
     if ((p->state != PAXOS_STATE_ACTIVE && p->state != PAXOS_STATE_RECOVERING_PHASE2) || msg->ballot != p->active_ballot) return;
     if (msg->slot <= p->local_commit_index) return;
 
@@ -210,9 +210,13 @@ static void handle_accepted(paxos_t* p, paxos_msg_t* msg) {
     }
     if (!found) return;
 
-    paxos_inflight_slot_t* inf = &p->inflight[msg->slot % 4096];
+    paxos_inflight_slot_t* inf = &p->inflight[msg->slot % INFLIGHT_WINDOW];
 
-    if (!inf->active || inf->slot != msg->slot || inf->ballot != msg->ballot) {
+    if (inf->active && (inf->slot != msg->slot || inf->ballot != msg->ballot)) {
+        return;
+    }
+
+    if (!inf->active) {
         inf->slot = msg->slot;
         inf->ballot = msg->ballot;
         inf->acks = 1;
@@ -228,14 +232,12 @@ static void handle_accepted(paxos_t* p, paxos_msg_t* msg) {
         if (has_quorum(p, inf->acks)) {
             inf->chosen = true;
 
-            // FIXED: Scan forward to find the highest contiguous chosen slot
             uint64_t highest_contiguous_chosen = p->local_commit_index;
-            while (highest_contiguous_chosen + 1 < p->next_slot && p->inflight[(highest_contiguous_chosen + 1) % 4096].chosen) {
+            while (highest_contiguous_chosen + 1 < p->next_slot && p->inflight[(highest_contiguous_chosen + 1) % INFLIGHT_WINDOW].chosen) {
                 highest_contiguous_chosen++;
-                p->inflight[highest_contiguous_chosen % 4096].active = false;
+                p->inflight[highest_contiguous_chosen % INFLIGHT_WINDOW].active = false;
             }
 
-            // FIXED: Route it through the official commit pipeline so config changes apply!
             if (highest_contiguous_chosen > p->leader_commit_hint) {
                 p->leader_commit_hint = highest_contiguous_chosen;
                 paxos_advance_local_commit(p);
@@ -278,6 +280,7 @@ static void handle_fetch_entries(paxos_t* p, paxos_msg_t* msg) {
 }
 
 static void handle_install_snapshot_res(paxos_t* p, paxos_msg_t* msg) {
+    observe_higher_ballot(p, msg->ballot);
     if (p->state != PAXOS_STATE_ACTIVE || msg->ballot != p->active_ballot) return;
 
     size_t peer_idx = 0; bool found = false;
@@ -306,12 +309,11 @@ static void handle_install_snapshot_res(paxos_t* p, paxos_msg_t* msg) {
 }
 
 static void handle_nack(paxos_t* p, paxos_msg_t* msg) {
-    if (msg->promised_ballot > p->last_observed_ballot) p->last_observed_ballot = msg->promised_ballot;
+    observe_higher_ballot(p, msg->promised_ballot);
 
-    if (msg->promised_ballot > p->active_ballot) {
-        p->state = PAXOS_STATE_LEARNER;
+    // FIXED: Restore the assignment so the node properly adopts the higher epoch!
+    if (msg->promised_ballot > p->promised_ballot) {
         p->promised_ballot = msg->promised_ballot;
-        p->leader_id = 0;
     }
 }
 

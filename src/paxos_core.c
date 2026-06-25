@@ -21,7 +21,7 @@ paxos_t* paxos_create(uint64_t id, uint64_t* peers, size_t num_peers) {
     p->log_cap = 1024;
     p->log_base_slot = 1;
     p->log = calloc(p->log_cap, sizeof(paxos_log_slot_t));
-    p->inflight = calloc(4096, sizeof(paxos_inflight_slot_t));
+    p->inflight = calloc(INFLIGHT_WINDOW, sizeof(paxos_inflight_slot_t));
 
     p->recovery_cap = 1024;
     p->recovery_buffer = calloc(p->recovery_cap, sizeof(paxos_recovery_slot_t));
@@ -30,6 +30,12 @@ paxos_t* paxos_create(uint64_t id, uint64_t* peers, size_t num_peers) {
         paxos_destroy(p);
         return NULL;
     }
+
+    // Initialize timers for automated liveness
+    p->current_tick = 0;
+    p->heartbeat_timeout = 10;
+    p->election_timeout = 30;
+    p->randomized_election_timeout = p->election_timeout + (rand() % p->election_timeout);
 
     return p;
 }
@@ -59,9 +65,8 @@ paxos_t* paxos_restore(uint64_t id, uint64_t* peers, size_t num_peers,
             paxos_destroy(p);
             return NULL;
         }
-        if (e->slot > p->stable_accepted_through) {
-            p->stable_accepted_through = e->slot;
-        }
+        // When restoring from disk, these are already stable!
+        p->log[e->slot - p->log_base_slot].unstable = false;
     }
 
     return p;
@@ -96,7 +101,7 @@ void paxos_destroy(paxos_t* p) {
     }
 
     if (p->pending_snapshot_data) free(p->pending_snapshot_data);
-    if (p->read_states) free(p->read_states); // <-- NEW
+    if (p->read_states) free(p->read_states);
 
     free(p);
 }
@@ -132,7 +137,8 @@ static bool paxos_msg_is_valid(paxos_msg_t* msg) {
         return true;
     }
 
-    if (msg->ballot == 0 && msg->type != MSG_READ_BARRIER) return false;
+    // Core network messages must have a ballot context, except ticks and read barriers
+    if (msg->ballot == 0 && msg->type != MSG_READ_BARRIER && msg->type != MSG_TICK) return false;
 
     if (msg->type == MSG_PROMISE || msg->type == MSG_FETCH_ENTRIES_RES) {
         if (msg->num_entries > 0 && !msg->entries) return false;
@@ -149,19 +155,54 @@ static bool paxos_msg_is_valid(paxos_msg_t* msg) {
     return true;
 }
 
+void paxos_tick(paxos_t* p) {
+    if (p->fatal_error) return;
+
+    p->current_tick++;
+
+    if (p->state == PAXOS_STATE_ACTIVE) {
+        // Leader maintains authority by broadcasting heartbeats
+        if (p->current_tick >= p->heartbeat_timeout) {
+            p->current_tick = 0;
+            for (size_t i = 0; i < p->num_peers; i++) {
+                paxos_msg_t beat = {
+                    .type = MSG_TICK,
+                    .to = p->peers[i],
+                    .ballot = p->active_ballot,
+                    .commit_index = p->local_commit_index
+                };
+                paxos_send_immediate(p, beat);
+            }
+        }
+    } else {
+        // Follower assumes leader death if timeout triggers
+        if (p->current_tick >= p->randomized_election_timeout) {
+            p->current_tick = 0;
+            p->randomized_election_timeout = p->election_timeout + (rand() % p->election_timeout);
+
+            extern void paxos_proposer_campaign(paxos_t* p);
+            paxos_proposer_campaign(p);
+        }
+    }
+}
+
 void paxos_step_local(paxos_t* p, paxos_msg_t* msg) {
     if (p->fatal_error || !paxos_msg_is_valid(msg)) return;
 
-    if (msg->type == MSG_PROPOSE) {
-        if (p->state != PAXOS_STATE_ACTIVE) return;
+    if (p->state != PAXOS_STATE_ACTIVE) return;
 
-        // NEW: Pipeline Stall for Safe Reconfiguration
-        // We scan the uncommitted tail. If a config change is inflight, we MUST
-        // drop new proposals until it is fully committed.
+    if (p->active_ballot < p->promised_ballot) {
+        p->state = PAXOS_STATE_LEARNER;
+        p->leader_id = 0;
+        return;
+    }
+
+    if (msg->type == MSG_PROPOSE) {
+        // Pipeline Stall: Block proposals if dynamic reconfiguration is in flight
         for (uint64_t s = p->local_commit_index + 1; s < p->next_slot; s++) {
             paxos_entry_t* inflight_e = paxos_log_get(p, s);
             if (inflight_e && (inflight_e->type == ENTRY_CONF_ADD || inflight_e->type == ENTRY_CONF_REMOVE)) {
-                return; // Yields backpressure to the host application
+                return;
             }
         }
 
@@ -172,7 +213,7 @@ void paxos_step_local(paxos_t* p, paxos_msg_t* msg) {
             return;
         }
 
-        paxos_inflight_slot_t* inf = &p->inflight[slot % 4096];
+        paxos_inflight_slot_t* inf = &p->inflight[slot % INFLIGHT_WINDOW];
         inf->slot = slot;
         inf->ballot = p->active_ballot;
         inf->acks = 1;
@@ -192,8 +233,9 @@ void paxos_step_local(paxos_t* p, paxos_msg_t* msg) {
 
 void paxos_step_remote(paxos_t* p, paxos_msg_t* msg) {
     if (p->fatal_error || msg->to != p->id || !paxos_msg_is_valid(msg)) return;
+
     switch (msg->type) {
-        case MSG_PREPARE: case MSG_ACCEPT: case MSG_COMMIT_NOTICE: case MSG_FETCH_ENTRIES_RES: case MSG_INSTALL_SNAPSHOT: case MSG_READ_BARRIER:
+        case MSG_PREPARE: case MSG_ACCEPT: case MSG_COMMIT_NOTICE: case MSG_FETCH_ENTRIES_RES: case MSG_INSTALL_SNAPSHOT: case MSG_READ_BARRIER: case MSG_TICK:
             paxos_acceptor_step(p, msg); break;
         case MSG_PROMISE: case MSG_ACCEPTED: case MSG_NACK: case MSG_FETCH_ENTRIES: case MSG_INSTALL_SNAPSHOT_RES: case MSG_READ_BARRIER_RES:
             paxos_proposer_step(p, msg); break;
@@ -210,7 +252,7 @@ paxos_ready_t paxos_get_ready(paxos_t* p) {
     ready.hard_state.has_update = (p->promised_ballot != p->prev_hard_state.promised_ballot) ||
                                   (p->max_generated_ballot != p->prev_hard_state.max_generated_ballot);
 
-    ready.entries_to_save = paxos_log_extract_suffix(p, p->stable_accepted_through + 1, &ready.num_entries_to_save);
+    ready.entries_to_save = paxos_log_extract_unstable(p, &ready.num_entries_to_save);
 
     ready.messages_immediate = p->msg_queue_immediate;
     ready.num_messages_immediate = p->msg_queue_immediate_len;
@@ -218,7 +260,6 @@ paxos_ready_t paxos_get_ready(paxos_t* p) {
     ready.messages_after_persist = p->msg_queue_after_persist;
     ready.num_messages_after_persist = p->msg_queue_after_persist_len;
 
-    // NEW: Expose the read barriers that have gathered a quorum
     ready.read_states = p->read_states;
     ready.num_read_states = p->num_read_states;
 
@@ -264,14 +305,25 @@ void paxos_ready_destroy(paxos_ready_t* ready) {
 void paxos_advance(paxos_t* p, uint64_t stable_accepted_through, uint64_t applied_slot) {
     if (p->fatal_error) return;
 
-    if (stable_accepted_through > p->stable_accepted_through) p->stable_accepted_through = stable_accepted_through;
-    if (applied_slot > p->last_applied) p->last_applied = applied_slot;
+    if (stable_accepted_through > p->stable_accepted_through) {
+        p->stable_accepted_through = stable_accepted_through;
+    }
+    if (applied_slot > p->last_applied) {
+        p->last_applied = applied_slot;
+    }
+
+    // Safely mark slots as stable only if they fall under the exact disk horizon
+    for (size_t i = 0; i < p->log_cap; i++) {
+        if (p->log[i].has_value && p->log[i].entry.slot <= p->stable_accepted_through) {
+            p->log[i].unstable = false;
+        }
+    }
 
     p->prev_hard_state.promised_ballot = p->promised_ballot;
     p->prev_hard_state.max_generated_ballot = p->max_generated_ballot;
 
     p->msg_queue_immediate_len = 0;
-    p->num_read_states = 0; // <-- NEW: Safely clear extracted reads
+    p->num_read_states = 0;
 
     if (p->msg_queue_after_persist) {
         for (size_t i = 0; i < p->msg_queue_after_persist_len; i++) {
@@ -318,7 +370,6 @@ void paxos_snapshot_acked(paxos_t* p, bool success) {
         p->last_applied = p->snapshot_index;
         p->local_commit_index = p->snapshot_index;
         p->leader_commit_hint = p->snapshot_index;
-        p->stable_accepted_through = p->snapshot_index;
     }
 
     paxos_send_immediate(p, res);

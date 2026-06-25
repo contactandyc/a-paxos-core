@@ -136,6 +136,8 @@ void     paxos_destroy(paxos_t* p);
 void          paxos_step_local(paxos_t* p, paxos_msg_t* msg);
 void          paxos_step_remote(paxos_t* p, paxos_msg_t* msg);
 
+void paxos_tick(paxos_t* p);
+
 paxos_ready_t paxos_get_ready(paxos_t* p);
 void          paxos_ready_destroy(paxos_ready_t* ready);
 void          paxos_advance(paxos_t* p, uint64_t stable_accepted_through, uint64_t applied_slot);

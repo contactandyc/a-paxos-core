@@ -26,7 +26,6 @@ static void check_and_fetch_gaps(paxos_t* p) {
 
 static void handle_fetch_entries_res(paxos_t* p, paxos_msg_t* msg) {
     if (msg->reject) return;
-
     for (size_t i = 0; i < msg->num_entries; i++) {
         paxos_entry_t* e = &msg->entries[i];
         paxos_log_accept(p, e->slot, e->accepted_ballot, e->type, e->client_id, e->client_seq, e->data, e->data_len);
@@ -37,7 +36,7 @@ static void handle_fetch_entries_res(paxos_t* p, paxos_msg_t* msg) {
 }
 
 static void handle_install_snapshot(paxos_t* p, paxos_msg_t* msg) {
-    if (msg->ballot > p->last_observed_ballot) p->last_observed_ballot = msg->ballot;
+    observe_higher_ballot(p, msg->ballot);
     if (msg->ballot < p->promised_ballot) {
         reply_nack(p, msg);
         return;
@@ -98,34 +97,31 @@ static void handle_install_snapshot(paxos_t* p, paxos_msg_t* msg) {
     }
 }
 
-// NEW: Acceptor acknowledges the leader's read barrier ping
 static void handle_read_barrier(paxos_t* p, paxos_msg_t* msg) {
-    if (msg->ballot > p->last_observed_ballot) p->last_observed_ballot = msg->ballot;
+    observe_higher_ballot(p, msg->ballot);
 
     if (msg->ballot < p->promised_ballot) {
         reply_nack(p, msg);
         return;
     }
-    p->promised_ballot = msg->ballot;
 
-    paxos_msg_t res = {
-        .type = MSG_READ_BARRIER_RES,
-        .to = msg->from,
-        .ballot = msg->ballot,
-        .read_seq = msg->read_seq
-    };
-    paxos_send_immediate(p, res); // Safe to answer immediately
+    paxos_msg_t res = { .type = MSG_READ_BARRIER_RES, .to = msg->from, .ballot = msg->ballot, .read_seq = msg->read_seq };
+
+    if (msg->ballot > p->promised_ballot) {
+        p->promised_ballot = msg->ballot;
+        paxos_send_after_persist(p, res);
+    } else {
+        paxos_send_immediate(p, res);
+    }
 }
 
 static void handle_prepare(paxos_t* p, paxos_msg_t* msg) {
-    if (msg->ballot > p->last_observed_ballot) p->last_observed_ballot = msg->ballot;
+    observe_higher_ballot(p, msg->ballot);
 
-    if (msg->ballot <= p->promised_ballot) {
+    if (msg->ballot < p->promised_ballot) {
         reply_nack(p, msg);
         return;
     }
-
-    p->promised_ballot = msg->ballot;
 
     uint64_t start_slot = msg->slot;
     if (start_slot <= p->snapshot_index) start_slot = p->snapshot_index + 1;
@@ -138,12 +134,24 @@ static void handle_prepare(paxos_t* p, paxos_msg_t* msg) {
         return;
     }
 
-    paxos_msg_t res = { .type = MSG_PROMISE, .to = msg->from, .ballot = msg->ballot, .entries = suffix, .num_entries = suffix_count };
-    paxos_send_after_persist(p, res);
+    paxos_msg_t res = {
+        .type = MSG_PROMISE,
+        .to = msg->from,
+        .ballot = msg->ballot,
+        .entries = suffix,
+        .num_entries = suffix_count
+    };
+
+    if (msg->ballot == p->promised_ballot) {
+        paxos_send_immediate(p, res);
+    } else {
+        p->promised_ballot = msg->ballot;
+        paxos_send_after_persist(p, res);
+    }
 }
 
 static void handle_accept(paxos_t* p, paxos_msg_t* msg) {
-    if (msg->ballot > p->last_observed_ballot) p->last_observed_ballot = msg->ballot;
+    observe_higher_ballot(p, msg->ballot);
 
     if (msg->ballot < p->promised_ballot) {
         reply_nack(p, msg);
@@ -157,6 +165,7 @@ static void handle_accept(paxos_t* p, paxos_msg_t* msg) {
 
     if (msg->num_entries != 1) return;
     paxos_entry_t* e = &msg->entries[0];
+    if (e->data_len > PAXOS_MAX_PAYLOAD_SIZE) return;
 
     paxos_entry_t* existing = paxos_log_get(p, msg->slot);
     if (existing) {
@@ -165,7 +174,7 @@ static void handle_accept(paxos_t* p, paxos_msg_t* msg) {
             return;
         }
         if (existing->accepted_ballot == msg->ballot) {
-            if (existing->data_len != e->data_len || (e->data_len > 0 && memcmp(existing->data, e->data, e->data_len) != 0)) {
+            if (!paxos_entry_value_equal(existing, e)) {
                 p->fatal_error = true;
                 return;
             }
@@ -173,9 +182,15 @@ static void handle_accept(paxos_t* p, paxos_msg_t* msg) {
     }
 
     p->promised_ballot = msg->ballot;
+    p->leader_id = msg->from;
 
     if (!paxos_log_accept(p, msg->slot, msg->ballot, e->type, e->client_id, e->client_seq, e->data, e->data_len)) {
         return;
+    }
+
+    if (msg->commit_index > p->leader_commit_hint) {
+        p->leader_commit_hint = msg->commit_index;
+        check_and_fetch_gaps(p);
     }
 
     paxos_msg_t res = { .type = MSG_ACCEPTED, .to = msg->from, .ballot = msg->ballot, .slot = msg->slot };
@@ -183,13 +198,34 @@ static void handle_accept(paxos_t* p, paxos_msg_t* msg) {
     paxos_advance_local_commit(p);
 }
 
+static void handle_tick(paxos_t* p, paxos_msg_t* msg) {
+    observe_higher_ballot(p, msg->ballot);
+
+    if (msg->ballot < p->promised_ballot) {
+        reply_nack(p, msg);
+        return;
+    }
+
+    // Acknowledge the leader and reset the death timer
+    p->promised_ballot = msg->ballot;
+    p->leader_id = msg->from;
+    p->current_tick = 0; // Reset election countdown!
+
+    if (msg->commit_index > p->leader_commit_hint) {
+        p->leader_commit_hint = msg->commit_index;
+        check_and_fetch_gaps(p);
+    }
+}
+
 void paxos_acceptor_step(paxos_t* p, paxos_msg_t* msg) {
     switch (msg->type) {
+        case MSG_TICK:            // <-- NEW
+            handle_tick(p, msg);
+            break;
         case MSG_PREPARE:
             handle_prepare(p, msg);
             break;
         case MSG_ACCEPT:
-            p->leader_id = msg->from;
             handle_accept(p, msg);
             check_and_fetch_gaps(p);
             break;
@@ -208,7 +244,7 @@ void paxos_acceptor_step(paxos_t* p, paxos_msg_t* msg) {
             handle_install_snapshot(p, msg);
             break;
         case MSG_READ_BARRIER:
-            handle_read_barrier(p, msg); // <-- NEW
+            handle_read_barrier(p, msg);
             break;
         default:
             break;
