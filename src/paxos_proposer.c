@@ -1,5 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
+//
+// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #include "paxos_internal.h"
 #include <string.h>
@@ -27,7 +29,7 @@ static void merge_into_recovery(paxos_t* p, paxos_entry_t* e) {
         if (r_slot->has_value && r_slot->recovered_value.data) free(r_slot->recovered_value.data);
         r_slot->highest_ballot_seen = e->accepted_ballot;
         r_slot->has_value = true;
-        paxos_entry_clone(&r_slot->recovered_value, e);
+        if (!paxos_entry_clone(&r_slot->recovered_value, e)) p->fatal_error = true;
     }
 }
 
@@ -48,15 +50,23 @@ static void check_promise_quorum_and_activate(paxos_t* p) {
 
             paxos_log_accept(p, s, p->active_ballot, final_val.type, final_val.client_id, final_val.client_seq, final_val.data, final_val.data_len);
 
-            for(size_t j = 0; j < p->num_peers; j++) {
-                paxos_entry_t* safe_copy = malloc(sizeof(paxos_entry_t));
-                if (safe_copy && paxos_entry_clone(safe_copy, paxos_log_get(p, s))) {
-                    paxos_msg_t acc = { .type = MSG_ACCEPT, .ballot = p->active_ballot, .slot = s, .commit_index = p->local_commit_index, .entries = safe_copy, .num_entries = 1 };
-                    acc.to = p->peers[j];
-                    paxos_send_after_persist(p, acc);
-                } else {
-                    if (safe_copy) free(safe_copy);
-                    p->fatal_error = true;
+            // Single-node clusters commit instantly during recovery
+            if (has_quorum(p, 1)) {
+                uint64_t target_idx = s - p->log_base_slot;
+                p->log[target_idx].chosen = true;
+                if (s > p->local_commit_index) p->local_commit_index = s;
+                p->leader_commit_hint = s;
+            } else {
+                for(size_t j = 0; j < p->num_peers; j++) {
+                    paxos_entry_t* safe_copy = malloc(sizeof(paxos_entry_t));
+                    if (safe_copy && paxos_entry_clone(safe_copy, paxos_log_get(p, s))) {
+                        paxos_msg_t acc = { .type = MSG_ACCEPT, .ballot = p->active_ballot, .slot = s, .commit_index = p->local_commit_index, .entries = safe_copy, .num_entries = 1 };
+                        acc.to = p->peers[j];
+                        paxos_send_after_persist(p, acc);
+                    } else {
+                        if (safe_copy) free(safe_copy);
+                        p->fatal_error = true;
+                    }
                 }
             }
         }
@@ -78,6 +88,7 @@ static void check_promise_quorum_and_activate(paxos_t* p) {
 
                 if (n_inf->acks >= ((p->num_peers + 1) / 2) + 1) {
                     n_inf->chosen = true;
+                    p->log[noop_slot - p->log_base_slot].chosen = true;
                     p->local_commit_index = noop_slot;
                     p->leader_commit_hint = noop_slot;
                 }
@@ -245,7 +256,7 @@ static void handle_accepted(paxos_t* p, paxos_msg_t* msg) {
     if ((p->state != PAXOS_STATE_ACTIVE && p->state != PAXOS_STATE_RECOVERING_PHASE2) || msg->ballot != p->active_ballot) return;
     if (msg->slot <= p->local_commit_index) return;
 
-    // Dangling ACK Guard: Tie the incoming ACK to our local proposed value.
+    // Ensure we actually hold the proposed value before trusting an ACK
     paxos_entry_t* local = paxos_log_get(p, msg->slot);
     if (!local || local->accepted_ballot != msg->ballot) return;
 
@@ -257,9 +268,7 @@ static void handle_accepted(paxos_t* p, paxos_msg_t* msg) {
 
     paxos_inflight_slot_t* inf = &p->inflight[msg->slot % INFLIGHT_WINDOW];
 
-    if (inf->active && (inf->slot != msg->slot || inf->ballot != msg->ballot)) {
-        return;
-    }
+    if (inf->active && (inf->slot != msg->slot || inf->ballot != msg->ballot)) return;
 
     if (!inf->active) {
         inf->slot = msg->slot;
@@ -281,6 +290,12 @@ static void handle_accepted(paxos_t* p, paxos_msg_t* msg) {
             while (highest_contiguous_chosen + 1 < p->next_slot) {
                 paxos_inflight_slot_t* next_inf = &p->inflight[(highest_contiguous_chosen + 1) % INFLIGHT_WINDOW];
                 if (next_inf->active && next_inf->slot == highest_contiguous_chosen + 1 && next_inf->ballot == p->active_ballot && next_inf->chosen) {
+
+                    uint64_t target_idx = (highest_contiguous_chosen + 1) - p->log_base_slot;
+                    if (target_idx < p->log_cap && p->log[target_idx].has_value) {
+                        p->log[target_idx].chosen = true;
+                    }
+
                     highest_contiguous_chosen++;
                     next_inf->active = false;
                 } else {
@@ -308,6 +323,7 @@ static void handle_accepted(paxos_t* p, paxos_msg_t* msg) {
 
                     if (n_inf->acks >= ((p->num_peers + 1) / 2) + 1) {
                         n_inf->chosen = true;
+                        p->log[noop_slot - p->log_base_slot].chosen = true;
                         p->local_commit_index = noop_slot;
                         p->leader_commit_hint = noop_slot;
                     }
@@ -332,7 +348,7 @@ static void handle_accepted(paxos_t* p, paxos_msg_t* msg) {
 static void handle_fetch_entries(paxos_t* p, paxos_msg_t* msg) {
     if (p->state != PAXOS_STATE_ACTIVE) return;
 
-    paxos_msg_t res = { .type = MSG_FETCH_ENTRIES_RES, .to = msg->from, .reject = false };
+    paxos_msg_t res = { .type = MSG_FETCH_ENTRIES_RES, .to = msg->from, .ballot = p->active_ballot, .reject = false };
 
     if (msg->slot <= p->snapshot_index) {
         size_t peer_idx = 0;

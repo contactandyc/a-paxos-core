@@ -64,6 +64,7 @@ bool paxos_log_accept(paxos_t* p, uint64_t slot, uint64_t ballot, entry_type_t t
 
     p->log[target_idx].has_value = true;
     p->log[target_idx].unstable = true;
+    p->log[target_idx].chosen = false;
 
     return true;
 }
@@ -170,50 +171,23 @@ paxos_entry_t* paxos_log_extract_range(paxos_t* p, uint64_t start_slot, uint64_t
 void paxos_advance_local_commit(paxos_t* p) {
     while (p->local_commit_index < p->leader_commit_hint) {
         uint64_t check_slot = p->local_commit_index + 1;
-        paxos_entry_t* e = paxos_log_get(p, check_slot);
+        uint64_t target_idx = check_slot - p->log_base_slot;
 
-        if (!e) break;
-
-        // Stale Commit Guard: Never blindly apply un-epoched data
-        if (e->accepted_ballot != p->promised_ballot) {
-            paxos_msg_t fetch = {
-                .type = MSG_FETCH_ENTRIES,
-                .to = p->leader_id,
-                .slot = check_slot,
-                .commit_index = check_slot
-            };
-            paxos_send_immediate(p, fetch);
+        if (target_idx >= p->log_cap || !p->log[target_idx].has_value) {
             break;
         }
 
-        if (e->type == ENTRY_CONF_ADD || e->type == ENTRY_CONF_REMOVE) {
-            if (e->data_len == sizeof(uint64_t)) {
-                uint64_t target_node;
-                memcpy(&target_node, e->data, sizeof(uint64_t));
+        paxos_log_slot_t* slot_data = &p->log[target_idx];
 
-                if (e->type == ENTRY_CONF_ADD) {
-                    bool exists = (p->id == target_node);
-                    for (size_t i = 0; i < p->num_peers; i++) {
-                        if (p->peers[i] == target_node) exists = true;
-                    }
-                    if (!exists && p->num_peers < MAX_REMOTE_PEERS) {
-                        p->peers[p->num_peers++] = target_node;
-                    }
-                } else if (e->type == ENTRY_CONF_REMOVE) {
-                    if (p->id == target_node) {
-                        p->state = PAXOS_STATE_LEARNER;
-                        p->leader_id = 0;
-                    } else {
-                        for (size_t i = 0; i < p->num_peers; i++) {
-                            if (p->peers[i] == target_node) {
-                                p->peers[i] = p->peers[p->num_peers - 1];
-                                p->num_peers--;
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
+        if (slot_data->entry.accepted_ballot == p->promised_ballot) {
+            slot_data->chosen = true;
+        }
+
+        if (!slot_data->chosen) {
+            // FIXED: Do not generate duplicate fetch messages here.
+            // Breaking the loop leaves local_commit < leader_hint,
+            // which triggers check_and_fetch_gaps() automatically!
+            break;
         }
 
         p->local_commit_index++;

@@ -1,14 +1,12 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
-//
-// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #include "paxos_internal.h"
 #include <string.h>
 #include <stdlib.h>
 
 static void reply_nack(paxos_t* p, paxos_msg_t* req) {
-    paxos_msg_t res = { .type = MSG_NACK, .to = req->from, .promised_ballot = p->promised_ballot };
+    paxos_msg_t res = { .type = MSG_NACK, .to = req->from, .ballot = req->ballot, .promised_ballot = p->promised_ballot };
     paxos_send_immediate(p, res);
 }
 
@@ -17,6 +15,7 @@ static void check_and_fetch_gaps(paxos_t* p) {
         paxos_msg_t fetch = {
             .type = MSG_FETCH_ENTRIES,
             .to = p->leader_id,
+            .ballot = p->promised_ballot, // FIXED: Followers must use promised_ballot
             .slot = p->local_commit_index + 1,
             .commit_index = p->leader_commit_hint
         };
@@ -25,10 +24,16 @@ static void check_and_fetch_gaps(paxos_t* p) {
 }
 
 static void handle_fetch_entries_res(paxos_t* p, paxos_msg_t* msg) {
-    if (msg->reject) return;
+    if (msg->reject || msg->ballot < p->promised_ballot || msg->from != p->leader_id) return;
+
     for (size_t i = 0; i < msg->num_entries; i++) {
         paxos_entry_t* e = &msg->entries[i];
         paxos_log_accept(p, e->slot, e->accepted_ballot, e->type, e->client_id, e->client_seq, e->data, e->data_len);
+
+        uint64_t target_idx = e->slot - p->log_base_slot;
+        if (target_idx < p->log_cap && p->log[target_idx].has_value) {
+            p->log[target_idx].chosen = true;
+        }
     }
 
     paxos_advance_local_commit(p);
@@ -46,20 +51,20 @@ static void handle_install_snapshot(paxos_t* p, paxos_msg_t* msg) {
     p->leader_id = msg->from;
 
     if (msg->slot <= p->last_applied) {
-        paxos_msg_t res = { .type = MSG_INSTALL_SNAPSHOT_RES, .to = msg->from, .reject = false, .slot = msg->slot, .snapshot_done = true };
+        paxos_msg_t res = { .type = MSG_INSTALL_SNAPSHOT_RES, .to = msg->from, .ballot = p->promised_ballot, .reject = false, .slot = msg->slot, .snapshot_done = true };
         paxos_send_immediate(p, res);
         return;
     }
 
     if (msg->slot > p->snapshot_index) {
         if (p->pending_snapshot_chunk_ready) {
-            paxos_msg_t res = { .type = MSG_INSTALL_SNAPSHOT_RES, .to = msg->from, .reject = true, .slot = p->expected_snapshot_offset - p->pending_snapshot_len };
+            paxos_msg_t res = { .type = MSG_INSTALL_SNAPSHOT_RES, .to = msg->from, .ballot = p->promised_ballot, .reject = true, .slot = p->expected_snapshot_offset - p->pending_snapshot_len };
             paxos_send_immediate(p, res);
             return;
         }
 
         if (msg->snapshot_len > 0 && !msg->snapshot_data) {
-            paxos_msg_t res = { .type = MSG_INSTALL_SNAPSHOT_RES, .to = msg->from, .reject = true, .slot = p->expected_snapshot_offset };
+            paxos_msg_t res = { .type = MSG_INSTALL_SNAPSHOT_RES, .to = msg->from, .ballot = p->promised_ballot, .reject = true, .slot = p->expected_snapshot_offset };
             paxos_send_immediate(p, res);
             return;
         }
@@ -71,7 +76,7 @@ static void handle_install_snapshot(paxos_t* p, paxos_msg_t* msg) {
             p->pending_snapshot_msg_slot = msg->slot;
             p->pending_snapshot_msg_ballot = msg->ballot;
         } else if (!p->pending_snapshot || msg->snapshot_offset != p->expected_snapshot_offset) {
-            paxos_msg_t res = { .type = MSG_INSTALL_SNAPSHOT_RES, .to = msg->from, .reject = true, .slot = p->expected_snapshot_offset };
+            paxos_msg_t res = { .type = MSG_INSTALL_SNAPSHOT_RES, .to = msg->from, .ballot = p->promised_ballot, .reject = true, .slot = p->expected_snapshot_offset };
             paxos_send_immediate(p, res);
             return;
         }
@@ -92,7 +97,7 @@ static void handle_install_snapshot(paxos_t* p, paxos_msg_t* msg) {
         p->pending_snapshot_done = msg->snapshot_done;
         p->pending_snapshot_chunk_ready = true;
     } else {
-        paxos_msg_t res = { .type = MSG_INSTALL_SNAPSHOT_RES, .to = msg->from, .reject = false, .slot = msg->slot };
+        paxos_msg_t res = { .type = MSG_INSTALL_SNAPSHOT_RES, .to = msg->from, .ballot = p->promised_ballot, .reject = false, .slot = msg->slot };
         paxos_send_immediate(p, res);
     }
 }
@@ -158,11 +163,6 @@ static void handle_accept(paxos_t* p, paxos_msg_t* msg) {
         return;
     }
 
-    if (msg->commit_index > p->leader_commit_hint) {
-        p->leader_commit_hint = msg->commit_index;
-        paxos_advance_local_commit(p);
-    }
-
     if (msg->num_entries != 1) return;
     paxos_entry_t* e = &msg->entries[0];
     if (e->data_len > PAXOS_MAX_PAYLOAD_SIZE) return;
@@ -190,36 +190,36 @@ static void handle_accept(paxos_t* p, paxos_msg_t* msg) {
 
     if (msg->commit_index > p->leader_commit_hint) {
         p->leader_commit_hint = msg->commit_index;
-        check_and_fetch_gaps(p);
     }
 
     paxos_msg_t res = { .type = MSG_ACCEPTED, .to = msg->from, .ballot = msg->ballot, .slot = msg->slot };
     paxos_send_after_persist(p, res);
+
+    // FIXED: Only call advance and gap checks once!
     paxos_advance_local_commit(p);
+    check_and_fetch_gaps(p);
 }
 
 static void handle_tick(paxos_t* p, paxos_msg_t* msg) {
     observe_higher_ballot(p, msg->ballot);
-
     if (msg->ballot < p->promised_ballot) {
         reply_nack(p, msg);
         return;
     }
 
-    // Acknowledge the leader and reset the death timer
-    p->promised_ballot = msg->ballot;
     p->leader_id = msg->from;
-    p->current_tick = 0; // Reset election countdown!
+    p->current_tick = 0;
 
     if (msg->commit_index > p->leader_commit_hint) {
         p->leader_commit_hint = msg->commit_index;
+        paxos_advance_local_commit(p);
         check_and_fetch_gaps(p);
     }
 }
 
 void paxos_acceptor_step(paxos_t* p, paxos_msg_t* msg) {
     switch (msg->type) {
-        case MSG_TICK:            // <-- NEW
+        case MSG_TICK:
             handle_tick(p, msg);
             break;
         case MSG_PREPARE:
@@ -227,7 +227,6 @@ void paxos_acceptor_step(paxos_t* p, paxos_msg_t* msg) {
             break;
         case MSG_ACCEPT:
             handle_accept(p, msg);
-            check_and_fetch_gaps(p);
             break;
         case MSG_COMMIT_NOTICE:
             p->leader_id = msg->from;

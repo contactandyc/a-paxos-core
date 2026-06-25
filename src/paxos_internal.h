@@ -13,17 +13,11 @@
 #define MAX_REMOTE_PEERS (MAX_PEERS - 1)
 #define MAX_PENDING_READS 128
 #define INFLIGHT_WINDOW 4096
-#define MAX_CLIENT_TRACKING 1024
-
-typedef struct {
-    uint64_t client_id;
-    uint64_t client_seq;
-    uint64_t lru_tick;
-} paxos_client_session_t;
 
 typedef struct {
     bool has_value;
     bool unstable;
+    bool chosen; // NEW: Strict separation of Accepted vs Chosen state
     paxos_entry_t entry;
 } paxos_log_slot_t;
 
@@ -63,7 +57,7 @@ struct paxos_s {
     size_t log_cap;
     uint64_t log_base_slot;
 
-    uint64_t stable_accepted_through; // <-- FIXED: Restored this critical tracker!
+    uint64_t stable_accepted_through;
     uint64_t leader_commit_hint;
     uint64_t local_commit_index;
     uint64_t last_applied;
@@ -121,9 +115,6 @@ struct paxos_s {
     uint32_t election_timeout;
     uint32_t randomized_election_timeout;
 
-    paxos_client_session_t client_sessions[MAX_CLIENT_TRACKING];
-    uint64_t session_tick_counter;
-
     bool fatal_error;
 };
 
@@ -155,8 +146,6 @@ bool paxos_log_accept(paxos_t* p, uint64_t slot, uint64_t ballot, entry_type_t t
 paxos_entry_t* paxos_log_get(paxos_t* p, uint64_t slot);
 paxos_entry_t* paxos_log_extract_unstable(paxos_t* p, size_t* out_count);
 paxos_entry_t* paxos_log_extract_range(paxos_t* p, uint64_t start_slot, uint64_t end_slot, size_t* out_count);
-
-// <-- FIXED: Added missing declarations below! -->
 paxos_entry_t* paxos_log_extract_suffix(paxos_t* p, uint64_t start_slot, size_t* out_count);
 void paxos_advance_local_commit(paxos_t* p);
 
