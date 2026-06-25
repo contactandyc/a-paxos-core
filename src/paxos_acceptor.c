@@ -66,6 +66,11 @@ static void handle_install_snapshot(paxos_t* p, paxos_msg_t* msg) {
             paxos_send_immediate(p, res); return;
         }
         if (msg->snapshot_offset == 0) {
+            // FAANG: Guard against network replays of Chunk 0 resetting our snapshot stream
+            if (p->pending_snapshot && p->pending_snapshot_msg_slot == msg->slot && p->expected_snapshot_offset > 0) {
+                paxos_msg_t res = { .type = MSG_INSTALL_SNAPSHOT_RES, .to = msg->from, .ballot = p->promised_ballot, .reject = true, .slot = p->expected_snapshot_offset };
+                paxos_send_immediate(p, res); return;
+            }
             p->expected_snapshot_offset = 0; p->pending_snapshot = true; p->pending_snapshot_from = msg->from;
             p->pending_snapshot_msg_slot = msg->slot; p->pending_snapshot_msg_ballot = msg->ballot;
         } else if (!p->pending_snapshot || msg->snapshot_offset != p->expected_snapshot_offset) {
@@ -166,7 +171,6 @@ void paxos_acceptor_step(paxos_t* p, paxos_msg_t* msg) {
         case MSG_ACCEPT: handle_accept(p, msg); break;
         case MSG_COMMIT_NOTICE:
             observe_higher_ballot(p, msg->ballot);
-            // FAANG: Ignore commit notices that violate safety invariants
             if (msg->ballot < p->promised_ballot || (p->leader_id != 0 && msg->from != p->leader_id)) return;
 
             p->leader_id = msg->from;
