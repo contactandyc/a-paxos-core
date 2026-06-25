@@ -1,5 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
+//
+// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #include "paxos_internal.h"
 #include <string.h>
@@ -11,7 +13,31 @@ static void reply_nack(paxos_t* p, paxos_msg_t* req) {
         .to = req->from,
         .promised_ballot = p->promised_ballot
     };
-    paxos_send_immediate(p, res); // NACKs do not need fsync
+    paxos_send_immediate(p, res); // NACKs are safe to send immediately
+}
+
+static void check_and_fetch_gaps(paxos_t* p) {
+    if (p->local_commit_index < p->leader_commit_hint && p->leader_id != 0) {
+        paxos_msg_t fetch = {
+            .type = MSG_FETCH_ENTRIES,
+            .to = p->leader_id,
+            .slot = p->local_commit_index + 1,    // <--- FIXED: changed .index to .slot
+            .commit_index = p->leader_commit_hint
+        };
+        paxos_send_immediate(p, fetch);
+    }
+}
+
+static void handle_fetch_entries_res(paxos_t* p, paxos_msg_t* msg) {
+    if (msg->reject) return; // Wait for snapshot if rejected
+
+    for (size_t i = 0; i < msg->num_entries; i++) {
+        paxos_entry_t* e = &msg->entries[i];
+        paxos_log_accept(p, e->slot, e->accepted_ballot, e->type, e->client_id, e->client_seq, e->data, e->data_len);
+    }
+
+    paxos_advance_local_commit(p);
+    check_and_fetch_gaps(p);
 }
 
 static void handle_prepare(paxos_t* p, paxos_msg_t* msg) {
@@ -68,7 +94,6 @@ static void handle_accept(paxos_t* p, paxos_msg_t* msg) {
             reply_nack(p, msg);
             return;
         }
-        // Strict Same-Ballot Consistency check
         if (existing->accepted_ballot == msg->ballot) {
             if (existing->data_len != e->data_len || (e->data_len > 0 && memcmp(existing->data, e->data, e->data_len) != 0)) {
                 p->fatal_error = true;
@@ -101,13 +126,20 @@ void paxos_acceptor_step(paxos_t* p, paxos_msg_t* msg) {
             handle_prepare(p, msg);
             break;
         case MSG_ACCEPT:
+            p->leader_id = msg->from;
             handle_accept(p, msg);
+            check_and_fetch_gaps(p);
             break;
         case MSG_COMMIT_NOTICE:
+            p->leader_id = msg->from;
             if (msg->commit_index > p->leader_commit_hint) {
                 p->leader_commit_hint = msg->commit_index;
                 paxos_advance_local_commit(p);
+                check_and_fetch_gaps(p);
             }
+            break;
+        case MSG_FETCH_ENTRIES_RES:
+            handle_fetch_entries_res(p, msg);
             break;
         default:
             break;

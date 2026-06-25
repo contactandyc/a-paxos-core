@@ -46,6 +46,7 @@ endif()
 include(GNUInstallDirs)
 
 # ---- Dependencies (Standard CMake) ----
+find_package(the_macro_library CONFIG REQUIRED)
 
 # ---- Dependencies (PkgConfig Shims) ----
 
@@ -72,6 +73,7 @@ set_target_properties(a_paxos_core_debug PROPERTIES
 )
 
 target_link_libraries(a_paxos_core_debug PUBLIC
+  the_macro_library::the_macro_library
 )
 
 target_compile_options(a_paxos_core_debug PRIVATE ${_A_DEBUG_OPTS})
@@ -103,6 +105,7 @@ set_target_properties(a_paxos_core_memory PROPERTIES
 )
 
 target_link_libraries(a_paxos_core_memory PUBLIC
+  the_macro_library::the_macro_library
 )
 
 target_compile_options(a_paxos_core_memory PRIVATE ${_A_DEBUG_OPTS})
@@ -137,6 +140,7 @@ set_target_properties(a_paxos_core_static PROPERTIES
 )
 
 target_link_libraries(a_paxos_core_static PUBLIC
+  the_macro_library::the_macro_library
 )
 
 target_compile_options(a_paxos_core_static PRIVATE ${_A_RELEASE_OPTS})
@@ -168,6 +172,7 @@ set_target_properties(a_paxos_core_shared PROPERTIES
 )
 
 target_link_libraries(a_paxos_core_shared PUBLIC
+  the_macro_library::the_macro_library
 )
 
 target_compile_options(a_paxos_core_shared PRIVATE ${_A_RELEASE_OPTS})
@@ -233,7 +238,7 @@ endif()
 
 set(A_BUILD_TARGET_BASENAME "a_paxos_core")
 set(A_BUILD_EXPORT_NAMESPACE "a_paxos_core")
-set(A_BUILD_DEPS "")
+set(A_BUILD_DEPS "the_macro_library")
 
 include(CMakePackageConfigHelpers)
 configure_package_config_file(

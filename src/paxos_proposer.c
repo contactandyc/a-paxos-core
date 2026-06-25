@@ -1,5 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
+//
+// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #include "paxos_internal.h"
 #include <string.h>
@@ -44,18 +46,26 @@ void paxos_proposer_campaign(paxos_t* p) {
     p->active_ballot = (epoch << 16) | (p->id & 0xFFFF);
     p->max_generated_ballot = p->active_ballot;
 
-    // Reset Quorum tracking
     p->promises_received = 1;
     p->self_promised = true;
     memset(p->promised_by, 0, sizeof(p->promised_by));
 
-    // Fix 1: Local Acceptor Promise
+    // Self Promise
     p->promised_ballot = p->active_ballot;
 
-    if (p->recovery_buffer) memset(p->recovery_buffer, 0, p->recovery_cap * sizeof(paxos_recovery_slot_t));
+    // Clear Recovery Buffer & Fix Memory Leak
+    if (p->recovery_buffer) {
+        for (size_t i = 0; i < p->recovery_cap; i++) {
+            if (p->recovery_buffer[i].has_value) {
+                paxos_entry_destroy(&p->recovery_buffer[i].recovered_value);
+            }
+        }
+        memset(p->recovery_buffer, 0, p->recovery_cap * sizeof(paxos_recovery_slot_t));
+    }
+
     p->recovery_max_slot = p->local_commit_index;
 
-    // Fix 1: Merge Local Suffix
+    // Merge Local Suffix
     size_t count = 0;
     paxos_entry_t* suf = paxos_log_extract_suffix(p, p->local_commit_index + 1, &count);
     for (size_t i = 0; i < count; i++) merge_into_recovery(p, &suf[i]);
@@ -73,9 +83,7 @@ void paxos_proposer_campaign(paxos_t* p) {
 static void handle_promise(paxos_t* p, paxos_msg_t* msg) {
     if (p->state != PAXOS_STATE_RECOVERING_PHASE1 || msg->ballot != p->active_ballot) return;
 
-    // Fix 2: Duplicate Prevention
-    size_t peer_idx = 0;
-    bool found = false;
+    size_t peer_idx = 0; bool found = false;
     for (size_t i = 0; i < p->num_peers; i++) {
         if (p->peers[i] == msg->from) { peer_idx = i; found = true; break; }
     }
@@ -84,12 +92,9 @@ static void handle_promise(paxos_t* p, paxos_msg_t* msg) {
     p->promised_by[peer_idx] = true;
     p->promises_received++;
 
-    for (size_t i = 0; i < msg->num_entries; i++) {
-        merge_into_recovery(p, &msg->entries[i]);
-    }
+    for (size_t i = 0; i < msg->num_entries; i++) merge_into_recovery(p, &msg->entries[i]);
 
     if (has_quorum(p, p->promises_received)) {
-        // Fix 5: Enter Phase 2 of recovery, blocking client writes
         p->state = PAXOS_STATE_RECOVERING_PHASE2;
         p->leader_id = p->id;
 
@@ -113,10 +118,7 @@ static void handle_promise(paxos_t* p, paxos_msg_t* msg) {
         }
         p->next_slot = p->recovery_max_slot + 1;
 
-        // If there were no gaps to recover, activate immediately
-        if (p->local_commit_index >= p->recovery_max_slot) {
-            p->state = PAXOS_STATE_ACTIVE;
-        }
+        if (p->local_commit_index >= p->recovery_max_slot) p->state = PAXOS_STATE_ACTIVE;
     }
 }
 
@@ -132,11 +134,10 @@ static void handle_accepted(paxos_t* p, paxos_msg_t* msg) {
 
     paxos_inflight_slot_t* inf = &p->inflight[msg->slot % 4096];
 
-    // Fix 6: Inflight Ring Buffer Identity Validation
     if (!inf->active || inf->slot != msg->slot || inf->ballot != msg->ballot) {
         inf->slot = msg->slot;
         inf->ballot = msg->ballot;
-        inf->acks = 1; // Self ack
+        inf->acks = 1;
         memset(inf->acked_by, 0, MAX_PEERS);
         inf->chosen = false;
         inf->active = true;
@@ -162,6 +163,30 @@ static void handle_accepted(paxos_t* p, paxos_msg_t* msg) {
     }
 }
 
+static void handle_fetch_entries(paxos_t* p, paxos_msg_t* msg) {
+    if (p->state != PAXOS_STATE_ACTIVE) return;
+
+    paxos_msg_t res = {
+        .type = MSG_FETCH_ENTRIES_RES,
+        .to = msg->from,
+        .reject = false
+    };
+
+    // FIXED: msg->slot instead of msg->index
+    if (msg->slot <= p->snapshot_index) {
+        res.reject = true;
+        paxos_send_immediate(p, res);
+        return;
+    }
+
+    uint64_t end_slot = msg->commit_index;
+    if (end_slot > p->local_commit_index) end_slot = p->local_commit_index;
+
+    // FIXED: msg->slot instead of msg->index
+    res.entries = paxos_log_extract_range(p, msg->slot, end_slot, &res.num_entries);
+    paxos_send_after_persist(p, res);
+}
+
 static void handle_nack(paxos_t* p, paxos_msg_t* msg) {
     if (msg->promised_ballot > p->last_observed_ballot) p->last_observed_ballot = msg->promised_ballot;
 
@@ -177,6 +202,7 @@ void paxos_proposer_step(paxos_t* p, paxos_msg_t* msg) {
         case MSG_PROMISE: handle_promise(p, msg); break;
         case MSG_ACCEPTED: handle_accepted(p, msg); break;
         case MSG_NACK: handle_nack(p, msg); break;
+        case MSG_FETCH_ENTRIES: handle_fetch_entries(p, msg); break;
         default: break;
     }
 }

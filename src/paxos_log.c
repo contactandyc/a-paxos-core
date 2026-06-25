@@ -1,5 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
+//
+// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #include "paxos_internal.h"
 #include <stdlib.h>
@@ -103,11 +105,46 @@ paxos_entry_t* paxos_log_extract_suffix(paxos_t* p, uint64_t start_slot, size_t*
     return suffix;
 }
 
+paxos_entry_t* paxos_log_extract_range(paxos_t* p, uint64_t start_slot, uint64_t end_slot, size_t* out_count) {
+    *out_count = 0;
+    if (start_slot < p->log_base_slot) start_slot = p->log_base_slot;
+    if (end_slot < start_slot) return NULL;
+
+    size_t count = 0;
+    for (uint64_t s = start_slot; s <= end_slot; s++) {
+        uint64_t target_idx = s - p->log_base_slot;
+        if (target_idx < p->log_cap && p->log[target_idx].has_value) count++;
+    }
+
+    if (count == 0) return NULL;
+
+    paxos_entry_t* range = calloc(count, sizeof(paxos_entry_t));
+    if (!range) { p->fatal_error = true; return NULL; }
+
+    size_t j = 0;
+    for (uint64_t s = start_slot; s <= end_slot; s++) {
+        uint64_t target_idx = s - p->log_base_slot;
+        if (target_idx < p->log_cap && p->log[target_idx].has_value) {
+            if (!paxos_entry_clone(&range[j], &p->log[target_idx].entry)) {
+                for(size_t k = 0; k < j; k++) paxos_entry_destroy(&range[k]);
+                free(range);
+                p->fatal_error = true;
+                return NULL;
+            }
+            j++;
+        }
+    }
+
+    *out_count = count;
+    return range;
+}
+
 void paxos_advance_local_commit(paxos_t* p) {
-    // Learners can only apply contiguous chosen prefixes
+    // Learners can only apply contiguous chosen prefixes.
+    // If there is a gap, it stops advancing until the gap is filled.
     while (p->local_commit_index < p->leader_commit_hint) {
         uint64_t check_slot = p->local_commit_index + 1;
-        if (!paxos_log_get(p, check_slot)) break; // Stop at the first gap!
+        if (!paxos_log_get(p, check_slot)) break;
         p->local_commit_index++;
     }
 }

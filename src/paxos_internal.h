@@ -1,5 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
+//
+// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #ifndef PAXOS_INTERNAL_H
 #define PAXOS_INTERNAL_H
@@ -85,6 +87,7 @@ void paxos_entry_destroy(paxos_entry_t* e);
 bool paxos_log_accept(paxos_t* p, uint64_t slot, uint64_t ballot, entry_type_t type, uint64_t cid, uint64_t cseq, const uint8_t* data, size_t data_len);
 paxos_entry_t* paxos_log_get(paxos_t* p, uint64_t slot);
 paxos_entry_t* paxos_log_extract_suffix(paxos_t* p, uint64_t start_slot, size_t* out_count);
+paxos_entry_t* paxos_log_extract_range(paxos_t* p, uint64_t start_slot, uint64_t end_slot, size_t* out_count);
 void paxos_advance_local_commit(paxos_t* p);
 
 void paxos_acceptor_step(paxos_t* p, paxos_msg_t* msg);

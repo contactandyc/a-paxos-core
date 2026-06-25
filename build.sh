@@ -89,9 +89,9 @@ case "$COMMAND" in
 
     # Automatically cascade into the correct first-party build or test
     if [ "$COMMAND" = "bootstrap-test" ]; then
-      bash "$BASH_SOURCE" test
+      "$0" test
     else
-      bash "$BASH_SOURCE" build
+      "$0" build
     fi
     ;;
 

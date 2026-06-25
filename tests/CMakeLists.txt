@@ -36,6 +36,7 @@ endif()
 
 find_library(M_LIB m)
 
+find_package(the_macro_library CONFIG REQUIRED)
 
 # Fallback for standalone test builds (when not included via add_subdirectory)
 if(NOT TARGET a_paxos_core::a_paxos_core)
@@ -45,6 +46,55 @@ endif()
 set(TEST_EXECUTABLES "")
 
 # ---- Targets ----
+# ==============================================================================
+# test_paxos_catchup Target (Standard Test)
+# ==============================================================================
+add_executable(test_paxos_catchup
+  src/test_paxos_catchup.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_acceptor.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_core.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_log.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_proposer.c
+)
+
+target_include_directories(test_paxos_catchup BEFORE PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../src
+  ${CMAKE_CURRENT_SOURCE_DIR}/../include
+)
+
+list(APPEND TEST_EXECUTABLES test_paxos_catchup)
+
+set_target_properties(test_paxos_catchup PROPERTIES
+  C_STANDARD 23
+  C_STANDARD_REQUIRED YES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+)
+
+target_link_libraries(test_paxos_catchup PRIVATE the_macro_library::the_macro_library)
+target_link_libraries(test_paxos_catchup PRIVATE a_paxos_core::a_paxos_core)
+
+if(M_LIB)
+  target_link_libraries(test_paxos_catchup PRIVATE ${M_LIB})
+endif()
+
+if(MSVC)
+  target_compile_options(test_paxos_catchup PRIVATE /W4 ${TEST_COMPILER_OPTS})
+else()
+  target_compile_options(test_paxos_catchup PRIVATE -Wall -Wextra -Wpedantic ${TEST_COMPILER_OPTS})
+endif()
+
+if(A_ENABLE_COVERAGE)
+  if (CMAKE_C_COMPILER_ID MATCHES "Clang")
+    target_compile_options(test_paxos_catchup PRIVATE -O0 -g -fprofile-instr-generate -fcoverage-mapping)
+    target_link_options(test_paxos_catchup PRIVATE -fprofile-instr-generate -fcoverage-mapping)
+  elseif (CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(test_paxos_catchup PRIVATE -O0 -g --coverage)
+    target_link_options(test_paxos_catchup PRIVATE --coverage)
+  endif()
+endif()
+
+add_test(NAME test_paxos_catchup COMMAND $<TARGET_FILE:test_paxos_catchup>)
 # ==============================================================================
 # test_paxos_memory Target (Standard Test)
 # ==============================================================================
@@ -70,6 +120,7 @@ set_target_properties(test_paxos_memory PROPERTIES
   CXX_STANDARD_REQUIRED YES
 )
 
+target_link_libraries(test_paxos_memory PRIVATE the_macro_library::the_macro_library)
 target_link_libraries(test_paxos_memory PRIVATE a_paxos_core::a_paxos_core)
 
 if(M_LIB)
@@ -118,6 +169,7 @@ set_target_properties(test_paxos_phase1 PROPERTIES
   CXX_STANDARD_REQUIRED YES
 )
 
+target_link_libraries(test_paxos_phase1 PRIVATE the_macro_library::the_macro_library)
 target_link_libraries(test_paxos_phase1 PRIVATE a_paxos_core::a_paxos_core)
 
 if(M_LIB)
@@ -166,6 +218,7 @@ set_target_properties(test_paxos_phase2 PROPERTIES
   CXX_STANDARD_REQUIRED YES
 )
 
+target_link_libraries(test_paxos_phase2 PRIVATE the_macro_library::the_macro_library)
 target_link_libraries(test_paxos_phase2 PRIVATE a_paxos_core::a_paxos_core)
 
 if(M_LIB)

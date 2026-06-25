@@ -1,5 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
+//
+// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #ifndef PAXOS_H
 #define PAXOS_H
@@ -37,7 +39,9 @@ typedef enum {
     MSG_NACK,
     MSG_COMMIT_NOTICE,
     MSG_READ_BARRIER,
-    MSG_READ_BARRIER_RES
+    MSG_READ_BARRIER_RES,
+    MSG_FETCH_ENTRIES,     // <-- NEW: Learner asks Leader for missing slots
+    MSG_FETCH_ENTRIES_RES  // <-- NEW: Leader sends missing slots back
 } msg_type_t;
 
 typedef enum {
