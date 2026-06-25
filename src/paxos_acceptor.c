@@ -8,12 +8,8 @@
 #include <stdlib.h>
 
 static void reply_nack(paxos_t* p, paxos_msg_t* req) {
-    paxos_msg_t res = {
-        .type = MSG_NACK,
-        .to = req->from,
-        .promised_ballot = p->promised_ballot
-    };
-    paxos_send_immediate(p, res); // NACKs are safe to send immediately
+    paxos_msg_t res = { .type = MSG_NACK, .to = req->from, .promised_ballot = p->promised_ballot };
+    paxos_send_immediate(p, res);
 }
 
 static void check_and_fetch_gaps(paxos_t* p) {
@@ -21,7 +17,7 @@ static void check_and_fetch_gaps(paxos_t* p) {
         paxos_msg_t fetch = {
             .type = MSG_FETCH_ENTRIES,
             .to = p->leader_id,
-            .slot = p->local_commit_index + 1,    // <--- FIXED: changed .index to .slot
+            .slot = p->local_commit_index + 1,
             .commit_index = p->leader_commit_hint
         };
         paxos_send_immediate(p, fetch);
@@ -29,7 +25,7 @@ static void check_and_fetch_gaps(paxos_t* p) {
 }
 
 static void handle_fetch_entries_res(paxos_t* p, paxos_msg_t* msg) {
-    if (msg->reject) return; // Wait for snapshot if rejected
+    if (msg->reject) return;
 
     for (size_t i = 0; i < msg->num_entries; i++) {
         paxos_entry_t* e = &msg->entries[i];
@@ -38,6 +34,72 @@ static void handle_fetch_entries_res(paxos_t* p, paxos_msg_t* msg) {
 
     paxos_advance_local_commit(p);
     check_and_fetch_gaps(p);
+}
+
+// NEW: Safely accept heavy binary state chunks from the Leader
+static void handle_install_snapshot(paxos_t* p, paxos_msg_t* msg) {
+    if (msg->ballot > p->last_observed_ballot) p->last_observed_ballot = msg->ballot;
+    if (msg->ballot < p->promised_ballot) {
+        reply_nack(p, msg);
+        return;
+    }
+
+    p->promised_ballot = msg->ballot;
+    p->leader_id = msg->from;
+
+    if (msg->slot <= p->last_applied) {
+        // Fast-Ack if we already hold this snapshot
+        paxos_msg_t res = { .type = MSG_INSTALL_SNAPSHOT_RES, .to = msg->from, .reject = false, .slot = msg->slot, .snapshot_done = true };
+        paxos_send_immediate(p, res);
+        return;
+    }
+
+    if (msg->slot > p->snapshot_index) {
+        // Yield Backpressure if host application is still processing the last chunk
+        if (p->pending_snapshot_chunk_ready) {
+            paxos_msg_t res = { .type = MSG_INSTALL_SNAPSHOT_RES, .to = msg->from, .reject = true, .slot = p->expected_snapshot_offset - p->pending_snapshot_len };
+            paxos_send_immediate(p, res);
+            return;
+        }
+
+        if (msg->snapshot_len > 0 && !msg->snapshot_data) {
+            paxos_msg_t res = { .type = MSG_INSTALL_SNAPSHOT_RES, .to = msg->from, .reject = true, .slot = p->expected_snapshot_offset };
+            paxos_send_immediate(p, res);
+            return;
+        }
+
+        if (msg->snapshot_offset == 0) {
+            p->expected_snapshot_offset = 0;
+            p->pending_snapshot = true;
+            p->pending_snapshot_from = msg->from;
+            p->pending_snapshot_msg_slot = msg->slot;
+            p->pending_snapshot_msg_ballot = msg->ballot;
+        } else if (!p->pending_snapshot || msg->snapshot_offset != p->expected_snapshot_offset) {
+            // Mismatched offset, tell leader exactly where to resend from
+            paxos_msg_t res = { .type = MSG_INSTALL_SNAPSHOT_RES, .to = msg->from, .reject = true, .slot = p->expected_snapshot_offset };
+            paxos_send_immediate(p, res);
+            return;
+        }
+
+        uint8_t* chunk = NULL;
+        if (msg->snapshot_len > 0) {
+            chunk = malloc(msg->snapshot_len);
+            if (!chunk) { p->fatal_error = true; return; }
+            memcpy(chunk, msg->snapshot_data, msg->snapshot_len);
+        }
+
+        if (p->pending_snapshot_data) free(p->pending_snapshot_data);
+        p->pending_snapshot_data = chunk;
+
+        p->expected_snapshot_offset += msg->snapshot_len;
+        p->pending_snapshot_len = msg->snapshot_len;
+        p->pending_snapshot_offset = msg->snapshot_offset;
+        p->pending_snapshot_done = msg->snapshot_done;
+        p->pending_snapshot_chunk_ready = true;
+    } else {
+        paxos_msg_t res = { .type = MSG_INSTALL_SNAPSHOT_RES, .to = msg->from, .reject = false, .slot = msg->slot };
+        paxos_send_immediate(p, res);
+    }
 }
 
 static void handle_prepare(paxos_t* p, paxos_msg_t* msg) {
@@ -61,14 +123,7 @@ static void handle_prepare(paxos_t* p, paxos_msg_t* msg) {
         return;
     }
 
-    paxos_msg_t res = {
-        .type = MSG_PROMISE,
-        .to = msg->from,
-        .ballot = msg->ballot,
-        .entries = suffix,
-        .num_entries = suffix_count
-    };
-    // MUST persist promised_ballot before sending
+    paxos_msg_t res = { .type = MSG_PROMISE, .to = msg->from, .ballot = msg->ballot, .entries = suffix, .num_entries = suffix_count };
     paxos_send_after_persist(p, res);
 }
 
@@ -108,14 +163,7 @@ static void handle_accept(paxos_t* p, paxos_msg_t* msg) {
         return;
     }
 
-    paxos_msg_t res = {
-        .type = MSG_ACCEPTED,
-        .to = msg->from,
-        .ballot = msg->ballot,
-        .slot = msg->slot
-    };
-
-    // MUST persist accepted_ballot and accepted_value before sending
+    paxos_msg_t res = { .type = MSG_ACCEPTED, .to = msg->from, .ballot = msg->ballot, .slot = msg->slot };
     paxos_send_after_persist(p, res);
     paxos_advance_local_commit(p);
 }
@@ -140,6 +188,9 @@ void paxos_acceptor_step(paxos_t* p, paxos_msg_t* msg) {
             break;
         case MSG_FETCH_ENTRIES_RES:
             handle_fetch_entries_res(p, msg);
+            break;
+        case MSG_INSTALL_SNAPSHOT:
+            handle_install_snapshot(p, msg); // <-- NEW
             break;
         default:
             break;

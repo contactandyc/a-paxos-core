@@ -82,7 +82,6 @@ paxos_entry_t* paxos_log_extract_suffix(paxos_t* p, uint64_t start_slot, size_t*
     for (size_t i = start_slot - p->log_base_slot; i < p->log_cap; i++) {
         if (p->log[i].has_value) count++;
     }
-
     if (count == 0) return NULL;
 
     paxos_entry_t* suffix = calloc(count, sizeof(paxos_entry_t));
@@ -100,7 +99,6 @@ paxos_entry_t* paxos_log_extract_suffix(paxos_t* p, uint64_t start_slot, size_t*
             j++;
         }
     }
-
     *out_count = count;
     return suffix;
 }
@@ -115,7 +113,6 @@ paxos_entry_t* paxos_log_extract_range(paxos_t* p, uint64_t start_slot, uint64_t
         uint64_t target_idx = s - p->log_base_slot;
         if (target_idx < p->log_cap && p->log[target_idx].has_value) count++;
     }
-
     if (count == 0) return NULL;
 
     paxos_entry_t* range = calloc(count, sizeof(paxos_entry_t));
@@ -134,17 +131,48 @@ paxos_entry_t* paxos_log_extract_range(paxos_t* p, uint64_t start_slot, uint64_t
             j++;
         }
     }
-
     *out_count = count;
     return range;
 }
 
 void paxos_advance_local_commit(paxos_t* p) {
-    // Learners can only apply contiguous chosen prefixes.
-    // If there is a gap, it stops advancing until the gap is filled.
     while (p->local_commit_index < p->leader_commit_hint) {
         uint64_t check_slot = p->local_commit_index + 1;
         if (!paxos_log_get(p, check_slot)) break;
         p->local_commit_index++;
     }
+}
+
+// NEW: Core Compaction Math
+void paxos_compact(paxos_t* p, uint64_t compact_slot) {
+    if (p->fatal_error || compact_slot <= p->snapshot_index || compact_slot > p->last_applied) return;
+    if (compact_slot >= p->log_base_slot + p->log_cap) return;
+
+    uint64_t target_idx = compact_slot - p->log_base_slot;
+
+    // Free payloads being discarded
+    for (uint64_t s = p->log_base_slot; s <= compact_slot; s++) {
+        uint64_t idx = s - p->log_base_slot;
+        if (idx < p->log_cap && p->log[idx].has_value) {
+            paxos_entry_destroy(&p->log[idx].entry);
+            p->log[idx].has_value = false;
+        }
+    }
+
+    // Shift the active array forward
+    size_t shift_count = target_idx + 1;
+    size_t keep_count = p->log_cap - shift_count;
+    if (keep_count > 0) {
+        memmove(p->log, &p->log[shift_count], keep_count * sizeof(paxos_log_slot_t));
+    }
+    memset(&p->log[keep_count], 0, shift_count * sizeof(paxos_log_slot_t));
+
+    // Math bounds shifted
+    p->log_base_slot = compact_slot + 1;
+    p->snapshot_index = compact_slot;
+
+    // Find the highest ballot in the discarded block to safely bind the snapshot
+    p->snapshot_ballot = p->active_ballot;
+
+    if (p->stable_accepted_through < compact_slot) p->stable_accepted_through = compact_slot;
 }

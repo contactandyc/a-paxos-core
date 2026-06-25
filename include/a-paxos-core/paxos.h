@@ -23,10 +23,10 @@ typedef enum {
 } paxos_err_t;
 
 typedef enum {
-    PAXOS_STATE_LEARNER,          // Passive follower/acceptor
-    PAXOS_STATE_RECOVERING_PHASE1,// Candidate building a promise quorum
-    PAXOS_STATE_RECOVERING_PHASE2,// Leader re-proposing recovered gaps
-    PAXOS_STATE_ACTIVE            // Stable Leader serving clients
+    PAXOS_STATE_LEARNER,
+    PAXOS_STATE_RECOVERING_PHASE1,
+    PAXOS_STATE_RECOVERING_PHASE2,
+    PAXOS_STATE_ACTIVE
 } paxos_state_t;
 
 typedef enum {
@@ -40,8 +40,10 @@ typedef enum {
     MSG_COMMIT_NOTICE,
     MSG_READ_BARRIER,
     MSG_READ_BARRIER_RES,
-    MSG_FETCH_ENTRIES,     // <-- NEW: Learner asks Leader for missing slots
-    MSG_FETCH_ENTRIES_RES  // <-- NEW: Leader sends missing slots back
+    MSG_FETCH_ENTRIES,
+    MSG_FETCH_ENTRIES_RES,
+    MSG_INSTALL_SNAPSHOT,      // <-- NEW: Leader streams snapshot chunk
+    MSG_INSTALL_SNAPSHOT_RES   // <-- NEW: Follower acknowledges chunk
 } msg_type_t;
 
 typedef enum {
@@ -72,6 +74,13 @@ typedef struct {
     paxos_entry_t* entries;
     size_t num_entries;
     uint64_t read_seq;
+
+    // NEW: Snapshot streaming metadata
+    uint8_t* snapshot_data;
+    size_t snapshot_len;
+    uint64_t snapshot_offset;
+    bool snapshot_done;
+
     bool reject;
 } paxos_msg_t;
 
@@ -87,25 +96,30 @@ typedef struct {
 } paxos_hard_state_t;
 
 typedef struct {
-    // 1. MUST BE FSYNCED FIRST
     paxos_hard_state_t hard_state;
     paxos_entry_t* entries_to_save;
     size_t num_entries_to_save;
 
-    // 2. SAFE TO SEND IMMEDIATELY (NACKs)
     paxos_msg_t* messages_immediate;
     size_t num_messages_immediate;
 
-    // 3. MUST WAIT UNTIL AFTER FSYNC TO SEND (Promises, Accepts, Accepteds)
     paxos_msg_t* messages_after_persist;
     size_t num_messages_after_persist;
 
-    // 4. SAFE TO APPLY TO STATE MACHINE
     paxos_entry_t* chosen_entries;
     size_t num_chosen_entries;
 
     paxos_read_state_t* read_states;
     size_t num_read_states;
+
+    // NEW: Snapshot receiver commands for the host application
+    bool install_snapshot;
+    uint64_t snapshot_slot;
+    uint64_t snapshot_ballot;
+    uint8_t* snapshot_data;
+    size_t snapshot_len;
+    uint64_t snapshot_offset;
+    bool snapshot_done;
 } paxos_ready_t;
 
 typedef struct paxos_s paxos_t;
@@ -120,9 +134,14 @@ paxos_ready_t paxos_get_ready(paxos_t* p);
 void          paxos_ready_destroy(paxos_ready_t* ready);
 void          paxos_advance(paxos_t* p, uint64_t stable_accepted_through, uint64_t applied_slot);
 
+// NEW: Core Snapshot Mechanics
+void          paxos_compact(paxos_t* p, uint64_t compact_slot);
+void          paxos_snapshot_acked(paxos_t* p, bool success);
+
 paxos_state_t paxos_state(paxos_t* p);
 uint64_t      paxos_promised_ballot(paxos_t* p);
 uint64_t      paxos_local_commit_index(paxos_t* p);
+uint64_t      paxos_snapshot_index(paxos_t* p);
 uint64_t      paxos_last_slot(paxos_t* p);
 bool          paxos_has_fatal_error(paxos_t* p);
 

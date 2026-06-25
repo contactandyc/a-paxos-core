@@ -27,7 +27,6 @@ static void merge_into_recovery(paxos_t* p, paxos_entry_t* e) {
     paxos_recovery_slot_t* r_slot = &p->recovery_buffer[e->slot];
     if (!r_slot->has_value || e->accepted_ballot > r_slot->highest_ballot_seen) {
         if (r_slot->has_value && r_slot->recovered_value.data) free(r_slot->recovered_value.data);
-
         r_slot->highest_ballot_seen = e->accepted_ballot;
         r_slot->has_value = true;
         paxos_entry_clone(&r_slot->recovered_value, e);
@@ -50,10 +49,8 @@ void paxos_proposer_campaign(paxos_t* p) {
     p->self_promised = true;
     memset(p->promised_by, 0, sizeof(p->promised_by));
 
-    // Self Promise
     p->promised_ballot = p->active_ballot;
 
-    // Clear Recovery Buffer & Fix Memory Leak
     if (p->recovery_buffer) {
         for (size_t i = 0; i < p->recovery_cap; i++) {
             if (p->recovery_buffer[i].has_value) {
@@ -65,7 +62,6 @@ void paxos_proposer_campaign(paxos_t* p) {
 
     p->recovery_max_slot = p->local_commit_index;
 
-    // Merge Local Suffix
     size_t count = 0;
     paxos_entry_t* suf = paxos_log_extract_suffix(p, p->local_commit_index + 1, &count);
     for (size_t i = 0; i < count; i++) merge_into_recovery(p, &suf[i]);
@@ -166,25 +162,64 @@ static void handle_accepted(paxos_t* p, paxos_msg_t* msg) {
 static void handle_fetch_entries(paxos_t* p, paxos_msg_t* msg) {
     if (p->state != PAXOS_STATE_ACTIVE) return;
 
-    paxos_msg_t res = {
-        .type = MSG_FETCH_ENTRIES_RES,
-        .to = msg->from,
-        .reject = false
-    };
+    paxos_msg_t res = { .type = MSG_FETCH_ENTRIES_RES, .to = msg->from, .reject = false };
 
-    // FIXED: msg->slot instead of msg->index
+    // NEW: If the learner asked for data we already compacted, trigger a snapshot push!
     if (msg->slot <= p->snapshot_index) {
-        res.reject = true;
-        paxos_send_immediate(p, res);
+        size_t peer_idx = 0;
+        for (size_t i = 0; i < p->num_peers; i++) {
+            if (p->peers[i] == msg->from) { peer_idx = i; break; }
+        }
+
+        paxos_msg_t snap = {
+            .type = MSG_INSTALL_SNAPSHOT,
+            .to = msg->from,
+            .ballot = p->active_ballot,
+            .slot = p->snapshot_index, // Metadata describing the snapshot's state horizon
+            .snapshot_offset = p->snapshot_offset[peer_idx] // Where this follower left off reading the file
+        };
+        paxos_send_immediate(p, snap);
         return;
     }
 
     uint64_t end_slot = msg->commit_index;
     if (end_slot > p->local_commit_index) end_slot = p->local_commit_index;
 
-    // FIXED: msg->slot instead of msg->index
     res.entries = paxos_log_extract_range(p, msg->slot, end_slot, &res.num_entries);
     paxos_send_after_persist(p, res);
+}
+
+// NEW: Follower responds to our snapshot chunk
+static void handle_install_snapshot_res(paxos_t* p, paxos_msg_t* msg) {
+    if (p->state != PAXOS_STATE_ACTIVE || msg->ballot != p->active_ballot) return;
+
+    size_t peer_idx = 0; bool found = false;
+    for (size_t i = 0; i < p->num_peers; i++) {
+        if (p->peers[i] == msg->from) { peer_idx = i; found = true; break; }
+    }
+    if (!found) return;
+
+    if (msg->reject) {
+        p->snapshot_offset[peer_idx] = msg->slot; // The follower requested a backtrack due to failure/mismatch
+    } else {
+        if (msg->snapshot_done) {
+            p->snapshot_offset[peer_idx] = 0; // Stream complete!
+        } else {
+            p->snapshot_offset[peer_idx] = msg->slot; // Stream progress advanced!
+        }
+    }
+
+    // Trigger the next chunk request (Host app reads file at offset and populates payload)
+    if (!msg->snapshot_done) {
+        paxos_msg_t snap = {
+            .type = MSG_INSTALL_SNAPSHOT,
+            .to = msg->from,
+            .ballot = p->active_ballot,
+            .slot = p->snapshot_index,
+            .snapshot_offset = p->snapshot_offset[peer_idx]
+        };
+        paxos_send_immediate(p, snap);
+    }
 }
 
 static void handle_nack(paxos_t* p, paxos_msg_t* msg) {
@@ -203,6 +238,7 @@ void paxos_proposer_step(paxos_t* p, paxos_msg_t* msg) {
         case MSG_ACCEPTED: handle_accepted(p, msg); break;
         case MSG_NACK: handle_nack(p, msg); break;
         case MSG_FETCH_ENTRIES: handle_fetch_entries(p, msg); break;
+        case MSG_INSTALL_SNAPSHOT_RES: handle_install_snapshot_res(p, msg); break; // <-- NEW
         default: break;
     }
 }

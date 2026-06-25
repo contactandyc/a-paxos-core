@@ -47,7 +47,10 @@ struct paxos_s {
     uint64_t leader_commit_hint;
     uint64_t local_commit_index;
     uint64_t last_applied;
+
+    // Snapshot state
     uint64_t snapshot_index;
+    uint64_t snapshot_ballot;
 
     uint64_t active_ballot;
     uint64_t last_observed_ballot;
@@ -74,6 +77,21 @@ struct paxos_s {
     paxos_msg_t* msg_queue_after_persist;
     size_t msg_queue_after_persist_cap;
     size_t msg_queue_after_persist_len;
+
+    // Leader: Stream tracking per follower
+    uint64_t snapshot_offset[MAX_PEERS];
+
+    // Follower: Incoming chunk tracking
+    bool pending_snapshot;
+    uint8_t* pending_snapshot_data;
+    size_t pending_snapshot_len;
+    uint64_t pending_snapshot_offset;
+    bool pending_snapshot_done;
+    uint64_t pending_snapshot_from;
+    uint64_t pending_snapshot_msg_slot;
+    uint64_t pending_snapshot_msg_ballot;
+    uint64_t expected_snapshot_offset;
+    bool pending_snapshot_chunk_ready;
 
     bool fatal_error;
 };
