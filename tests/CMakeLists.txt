@@ -194,6 +194,55 @@ endif()
 
 add_test(NAME test_paxos_chosen_invariants COMMAND $<TARGET_FILE:test_paxos_chosen_invariants>)
 # ==============================================================================
+# test_paxos_compaction_boundaries Target (Standard Test)
+# ==============================================================================
+add_executable(test_paxos_compaction_boundaries
+  src/test_paxos_compaction_boundaries.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_acceptor.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_core.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_log.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_proposer.c
+)
+
+target_include_directories(test_paxos_compaction_boundaries BEFORE PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../src
+  ${CMAKE_CURRENT_SOURCE_DIR}/../include
+)
+
+list(APPEND TEST_EXECUTABLES test_paxos_compaction_boundaries)
+
+set_target_properties(test_paxos_compaction_boundaries PROPERTIES
+  C_STANDARD 23
+  C_STANDARD_REQUIRED YES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+)
+
+target_link_libraries(test_paxos_compaction_boundaries PRIVATE the_macro_library::the_macro_library)
+target_link_libraries(test_paxos_compaction_boundaries PRIVATE a_paxos_core::a_paxos_core)
+
+if(M_LIB)
+  target_link_libraries(test_paxos_compaction_boundaries PRIVATE ${M_LIB})
+endif()
+
+if(MSVC)
+  target_compile_options(test_paxos_compaction_boundaries PRIVATE /W4 ${TEST_COMPILER_OPTS})
+else()
+  target_compile_options(test_paxos_compaction_boundaries PRIVATE -Wall -Wextra -Wpedantic ${TEST_COMPILER_OPTS})
+endif()
+
+if(A_ENABLE_COVERAGE)
+  if (CMAKE_C_COMPILER_ID MATCHES "Clang")
+    target_compile_options(test_paxos_compaction_boundaries PRIVATE -O0 -g -fprofile-instr-generate -fcoverage-mapping)
+    target_link_options(test_paxos_compaction_boundaries PRIVATE -fprofile-instr-generate -fcoverage-mapping)
+  elseif (CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(test_paxos_compaction_boundaries PRIVATE -O0 -g --coverage)
+    target_link_options(test_paxos_compaction_boundaries PRIVATE --coverage)
+  endif()
+endif()
+
+add_test(NAME test_paxos_compaction_boundaries COMMAND $<TARGET_FILE:test_paxos_compaction_boundaries>)
+# ==============================================================================
 # test_paxos_crash_lifecycle Target (Standard Test)
 # ==============================================================================
 add_executable(test_paxos_crash_lifecycle
@@ -340,6 +389,55 @@ if(A_ENABLE_COVERAGE)
 endif()
 
 add_test(NAME test_paxos_memory COMMAND $<TARGET_FILE:test_paxos_memory>)
+# ==============================================================================
+# test_paxos_persistance_races Target (Standard Test)
+# ==============================================================================
+add_executable(test_paxos_persistance_races
+  src/test_paxos_persistance_races.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_acceptor.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_core.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_log.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_proposer.c
+)
+
+target_include_directories(test_paxos_persistance_races BEFORE PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../src
+  ${CMAKE_CURRENT_SOURCE_DIR}/../include
+)
+
+list(APPEND TEST_EXECUTABLES test_paxos_persistance_races)
+
+set_target_properties(test_paxos_persistance_races PROPERTIES
+  C_STANDARD 23
+  C_STANDARD_REQUIRED YES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+)
+
+target_link_libraries(test_paxos_persistance_races PRIVATE the_macro_library::the_macro_library)
+target_link_libraries(test_paxos_persistance_races PRIVATE a_paxos_core::a_paxos_core)
+
+if(M_LIB)
+  target_link_libraries(test_paxos_persistance_races PRIVATE ${M_LIB})
+endif()
+
+if(MSVC)
+  target_compile_options(test_paxos_persistance_races PRIVATE /W4 ${TEST_COMPILER_OPTS})
+else()
+  target_compile_options(test_paxos_persistance_races PRIVATE -Wall -Wextra -Wpedantic ${TEST_COMPILER_OPTS})
+endif()
+
+if(A_ENABLE_COVERAGE)
+  if (CMAKE_C_COMPILER_ID MATCHES "Clang")
+    target_compile_options(test_paxos_persistance_races PRIVATE -O0 -g -fprofile-instr-generate -fcoverage-mapping)
+    target_link_options(test_paxos_persistance_races PRIVATE -fprofile-instr-generate -fcoverage-mapping)
+  elseif (CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(test_paxos_persistance_races PRIVATE -O0 -g --coverage)
+    target_link_options(test_paxos_persistance_races PRIVATE --coverage)
+  endif()
+endif()
+
+add_test(NAME test_paxos_persistance_races COMMAND $<TARGET_FILE:test_paxos_persistance_races>)
 # ==============================================================================
 # test_paxos_phase1 Target (Standard Test)
 # ==============================================================================

@@ -1,5 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
+//
+// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #include "paxos_internal.h"
 
@@ -37,6 +39,9 @@ static void handle_fetch_entries_res(paxos_t* p, paxos_msg_t* msg) {
 
         if (c_idx < p->log_chunks_cap && p->log_chunks[c_idx] && p->log_chunks[c_idx]->slots[c_off].has_value) {
             p->log_chunks[c_idx]->slots[c_off].chosen = true;
+#if PAXOS_ENABLE_RECONFIG
+            if (e->type >= ENTRY_CONF_ADD && e->type <= ENTRY_CONF_FINAL) paxos_rebuild_config(p);
+#endif
         }
     }
     paxos_advance_local_commit(p, msg->from, msg->ballot);
@@ -104,9 +109,16 @@ static void handle_read_barrier(paxos_t* p, paxos_msg_t* msg) {
         reply_nack(p, msg); return;
     }
     paxos_msg_t res = { .type = MSG_READ_BARRIER_RES, .to = msg->from, .ballot = msg->ballot, .read_seq = msg->read_seq };
-    if (msg->ballot > p->promised_ballot) {
-        p->promised_ballot = msg->ballot; paxos_send_after_persist(p, res);
-    } else paxos_send_immediate(p, res);
+
+    // FAANG: Safe Persistence Ordering Check
+    bool promise_is_durable = p->prev_hard_state.promised_ballot >= msg->ballot;
+    if (msg->ballot == p->promised_ballot) {
+        if (promise_is_durable) paxos_send_immediate(p, res);
+        else paxos_send_after_persist(p, res);
+    } else {
+        p->promised_ballot = msg->ballot;
+        paxos_send_after_persist(p, res);
+    }
 }
 
 static void handle_prepare(paxos_t* p, paxos_msg_t* msg) {
@@ -121,8 +133,17 @@ static void handle_prepare(paxos_t* p, paxos_msg_t* msg) {
     if (suffix_count > 0 && !suffix) { p->fatal_error = true; return; }
 
     paxos_msg_t res = { .type = MSG_PROMISE, .to = msg->from, .ballot = msg->ballot, .entries = suffix, .num_entries = suffix_count };
-    if (msg->ballot == p->promised_ballot) paxos_send_immediate(p, res);
-    else { p->promised_ballot = msg->ballot; paxos_send_after_persist(p, res); }
+
+    // FAANG: Strict Persistence Barrier
+    bool promise_is_durable = p->prev_hard_state.promised_ballot >= msg->ballot;
+
+    if (msg->ballot == p->promised_ballot) {
+        if (promise_is_durable) paxos_send_immediate(p, res);
+        else paxos_send_after_persist(p, res);
+    } else {
+        p->promised_ballot = msg->ballot;
+        paxos_send_after_persist(p, res);
+    }
 }
 
 static void handle_accept(paxos_t* p, paxos_msg_t* msg) {
@@ -135,13 +156,13 @@ static void handle_accept(paxos_t* p, paxos_msg_t* msg) {
     paxos_entry_t* e = &msg->entries[0];
     if (e->data_len > PAXOS_MAX_PAYLOAD_SIZE) return;
 
+#if !PAXOS_ENABLE_RECONFIG
     if (e->type >= ENTRY_CONF_ADD && e->type <= ENTRY_CONF_FINAL) return;
+#endif
 
     paxos_entry_t* existing = paxos_log_get(p, msg->slot);
     if (existing) {
         if (existing->accepted_ballot > msg->ballot) { reply_nack(p, msg); return; }
-
-        // FAANG: Restored split-brain firewall! Reject mismatched data in the SAME ballot.
         if (existing->accepted_ballot == msg->ballot && !paxos_entry_value_equal(existing, e)) {
             p->fatal_error = true;
             return;

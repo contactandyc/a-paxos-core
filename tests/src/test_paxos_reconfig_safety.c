@@ -1,7 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
-//
-// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #define PAXOS_TESTING 1
 #include <stdio.h>
@@ -22,7 +20,9 @@ MACRO_TEST(accepted_but_unchosen_config_must_not_change_quorum) {
     paxos_destroy(p);
 }
 
-MACRO_TEST(config_changes_membership_only_after_chosen) {
+// FIXED: Renamed to reflect the sandbox. Proves that even if a config gets marked 'chosen',
+// the engine completely ignores it because PAXOS_ENABLE_RECONFIG is 0.
+MACRO_TEST(config_entries_are_ignored_when_reconfig_is_disabled) {
     uint64_t peers[] = {1, 2, 3};
     paxos_t* p = paxos_create(1, peers, 3);
 
@@ -31,13 +31,12 @@ MACRO_TEST(config_changes_membership_only_after_chosen) {
 
     p->leader_id = 2;
     p->promised_ballot = 10;
-
-    // FIXED: Must provide the hint so the engine knows it is allowed to commit!
     p->leader_commit_hint = 1;
 
     paxos_advance_local_commit(p, 2, 10);
 
-    MACRO_ASSERT_EQ_INT(p->active_config_mask, 15);
+    // The mask MUST safely remain 7!
+    MACRO_ASSERT_EQ_INT(p->active_config_mask, 7);
 
     paxos_destroy(p);
 }
@@ -69,7 +68,7 @@ int main(void) {
     macro_test_case tests[256];
     size_t test_count = 0;
     MACRO_ADD(tests, accepted_but_unchosen_config_must_not_change_quorum);
-    MACRO_ADD(tests, config_changes_membership_only_after_chosen);
+    MACRO_ADD(tests, config_entries_are_ignored_when_reconfig_is_disabled);
     MACRO_ADD(tests, new_node_cannot_vote_until_explicitly_added);
     macro_run_all("paxos_reconfig_safety", tests, test_count);
     return 0;

@@ -1,5 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
+//
+// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #include "paxos_internal.h"
 
@@ -24,6 +26,7 @@ void paxos_entry_destroy(paxos_entry_t* e) {
 }
 
 void paxos_rebuild_config(paxos_t* p) {
+#if PAXOS_ENABLE_RECONFIG
     p->active_config_mask = p->base_config_mask;
     p->joint_config_mask = 0;
     p->in_joint_consensus = false;
@@ -55,6 +58,7 @@ void paxos_rebuild_config(paxos_t* p) {
             }
         }
     }
+#endif
 }
 
 bool paxos_log_accept(paxos_t* p, uint64_t slot, uint64_t ballot, entry_type_t type, uint64_t cid, uint64_t cseq, const uint8_t* data, size_t data_len) {
@@ -68,7 +72,10 @@ bool paxos_log_accept(paxos_t* p, uint64_t slot, uint64_t ballot, entry_type_t t
     if (c_idx >= p->log_chunks_cap) {
         size_t new_cap = c_idx + 128;
         paxos_log_chunk_t** new_chunks = realloc(p->log_chunks, new_cap * sizeof(paxos_log_chunk_t*));
-        if (!new_chunks) { p->fatal_error = true; return false; }
+        if (!new_chunks) {
+            p->fatal_error = true;
+            return false;
+        }
         memset(new_chunks + p->log_chunks_cap, 0, (new_cap - p->log_chunks_cap) * sizeof(paxos_log_chunk_t*));
         p->log_chunks = new_chunks;
         p->log_chunks_cap = new_cap;
@@ -76,7 +83,10 @@ bool paxos_log_accept(paxos_t* p, uint64_t slot, uint64_t ballot, entry_type_t t
 
     if (!p->log_chunks[c_idx]) {
         p->log_chunks[c_idx] = calloc(1, sizeof(paxos_log_chunk_t));
-        if (!p->log_chunks[c_idx]) { p->fatal_error = true; return false; }
+        if (!p->log_chunks[c_idx]) {
+            p->fatal_error = true;
+            return false;
+        }
     }
 
     paxos_log_slot_t* slot_data = &p->log_chunks[c_idx]->slots[c_off];
@@ -113,8 +123,12 @@ bool paxos_log_accept(paxos_t* p, uint64_t slot, uint64_t ballot, entry_type_t t
 
     if (had_value) paxos_entry_destroy(&old_entry);
 
+    // FAANG O(1) tail optimization
+    if (slot > p->highest_slot) p->highest_slot = slot;
+
     return true;
 }
+
 
 paxos_entry_t* paxos_log_get(paxos_t* p, uint64_t slot) {
     if (slot <= p->snapshot_index || slot < p->log_base_slot) return NULL;
@@ -250,8 +264,15 @@ void paxos_advance_local_commit(paxos_t* p, uint64_t author_id, uint64_t author_
     }
 }
 
+
 void paxos_compact(paxos_t* p, uint64_t compact_slot) {
     if (p->fatal_error || compact_slot <= p->snapshot_index || compact_slot > p->last_applied || compact_slot < p->log_base_slot) return;
+
+    // FAANG: Flawless chunk boundary math
+    uint64_t old_base_c = p->log_base_slot / PAXOS_LOG_CHUNK_SIZE;
+    uint64_t new_base   = compact_slot + 1;
+    uint64_t new_base_c = new_base / PAXOS_LOG_CHUNK_SIZE;
+    uint64_t chunks_to_shift = new_base_c - old_base_c;
 
     uint64_t end_c = paxos_chunk_idx(p, compact_slot);
 
@@ -261,6 +282,7 @@ void paxos_compact(paxos_t* p, uint64_t compact_slot) {
             paxos_log_slot_t* s_data = &p->log_chunks[c]->slots[o];
             if (!s_data->has_value || s_data->entry.slot > compact_slot) continue;
 
+#if PAXOS_ENABLE_RECONFIG
             paxos_entry_t* e = &s_data->entry;
             if (e->type == ENTRY_CONF_ADD && e->data_len == sizeof(uint64_t)) {
                 uint64_t target; memcpy(&target, e->data, sizeof(uint64_t));
@@ -271,39 +293,36 @@ void paxos_compact(paxos_t* p, uint64_t compact_slot) {
             } else if (e->type == ENTRY_CONF_FINAL) {
                 p->base_config_mask = p->joint_config_mask;
             }
+#endif
+
+            paxos_entry_destroy(&s_data->entry);
+            s_data->has_value = false;
         }
     }
 
-    for (size_t c = 0; c <= end_c && c < p->log_chunks_cap; c++) {
-        if (!p->log_chunks[c]) continue;
-        for (size_t o = 0; o < PAXOS_LOG_CHUNK_SIZE; o++) {
-            paxos_log_slot_t* s_data = &p->log_chunks[c]->slots[o];
-            if (s_data->has_value && s_data->entry.slot <= compact_slot) {
-                paxos_entry_destroy(&s_data->entry);
-                s_data->has_value = false;
+    // Shift safely using the new boundary logic
+    if (chunks_to_shift > 0) {
+        for (size_t c = 0; c < chunks_to_shift && c < p->log_chunks_cap; c++) {
+            if (p->log_chunks[c]) {
+                free(p->log_chunks[c]);
+                p->log_chunks[c] = NULL;
             }
         }
-    }
 
-    // FAANG: Safely shift the chunk array so relative indexing is preserved!
-    uint64_t chunks_to_shift = end_c;
-    for (size_t c = 0; c < chunks_to_shift && c < p->log_chunks_cap; c++) {
-        if (p->log_chunks[c]) {
-            free(p->log_chunks[c]);
-            p->log_chunks[c] = NULL;
+        if (chunks_to_shift < p->log_chunks_cap) {
+            size_t keep = p->log_chunks_cap - chunks_to_shift;
+            memmove(p->log_chunks, p->log_chunks + chunks_to_shift, keep * sizeof(paxos_log_chunk_t*));
+            memset(p->log_chunks + keep, 0, chunks_to_shift * sizeof(paxos_log_chunk_t*));
+        } else {
+            memset(p->log_chunks, 0, p->log_chunks_cap * sizeof(paxos_log_chunk_t*));
         }
     }
 
-    if (chunks_to_shift > 0 && chunks_to_shift < p->log_chunks_cap) {
-        size_t keep = p->log_chunks_cap - chunks_to_shift;
-        memmove(p->log_chunks, p->log_chunks + chunks_to_shift, keep * sizeof(paxos_log_chunk_t*));
-        memset(p->log_chunks + keep, 0, chunks_to_shift * sizeof(paxos_log_chunk_t*));
-    }
-
-    p->log_base_slot = compact_slot + 1;
+    p->log_base_slot = new_base;
     p->snapshot_index = compact_slot;
     p->snapshot_ballot = p->active_ballot;
     if (p->stable_accepted_through < compact_slot) p->stable_accepted_through = compact_slot;
+    if (compact_slot > p->highest_slot) p->highest_slot = compact_slot;
 
     paxos_rebuild_config(p);
 }

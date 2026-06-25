@@ -1,5 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
+//
+// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #include "paxos_internal.h"
 
@@ -332,8 +334,16 @@ static void handle_install_snapshot_res(paxos_t* p, paxos_msg_t* msg) {
 }
 
 static void handle_nack(paxos_t* p, paxos_msg_t* msg) {
-    observe_higher_ballot(p, msg->promised_ballot);
-    if (msg->promised_ballot > p->promised_ballot) p->promised_ballot = msg->promised_ballot;
+    // FAANG: Strict NACK Semantics - A remote rejection tells us about the world, it does not rewrite our local disk.
+    if (msg->promised_ballot > p->last_observed_ballot) {
+        p->last_observed_ballot = msg->promised_ballot;
+    }
+
+    // If the remote node has a higher ballot than our active election, we are deposed.
+    if (msg->promised_ballot > p->active_ballot && p->state != PAXOS_STATE_LEARNER) {
+        p->state = PAXOS_STATE_LEARNER;
+        p->leader_id = 0;
+    }
 }
 
 void paxos_proposer_step(paxos_t* p, paxos_msg_t* msg) {

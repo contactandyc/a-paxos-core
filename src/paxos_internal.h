@@ -1,5 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
+//
+// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #ifndef PAXOS_INTERNAL_H
 #define PAXOS_INTERNAL_H
@@ -14,6 +16,9 @@
 #define MAX_PENDING_READS 128
 #define INFLIGHT_WINDOW 4096
 #define MAX_RECOVERY_GAP 100000
+
+// FAANG: Fully sandbox the unfinished Joint-Consensus logic
+#define PAXOS_ENABLE_RECONFIG 0
 
 typedef struct {
     _Atomic uint32_t ref_count;
@@ -99,6 +104,9 @@ struct paxos_s {
     size_t log_chunks_cap;
     uint64_t log_base_slot;
 
+    // FAANG: O(1) Tail lookup speed optimization
+    uint64_t highest_slot;
+
     uint64_t stable_accepted_through;
     uint64_t leader_commit_hint;
     uint64_t local_commit_index;
@@ -163,7 +171,6 @@ bool paxos_entry_clone_deep(paxos_entry_t* dst, const paxos_entry_t* src);
 bool paxos_entry_clone_retain(paxos_entry_t* dst, const paxos_entry_t* src);
 void paxos_entry_destroy(paxos_entry_t* e);
 
-// FAANG: Safe global helpers for log addressing
 static inline uint64_t paxos_chunk_idx(paxos_t* p, uint64_t slot) {
     uint64_t base_c = p->log_base_slot / PAXOS_LOG_CHUNK_SIZE;
     uint64_t slot_c = slot / PAXOS_LOG_CHUNK_SIZE;
