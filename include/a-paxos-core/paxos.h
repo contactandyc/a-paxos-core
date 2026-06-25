@@ -1,7 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
-//
-// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #ifndef PAXOS_H
 #define PAXOS_H
@@ -23,27 +21,28 @@ typedef enum {
 } paxos_err_t;
 
 typedef enum {
-    PAXOS_STATE_LEARNER,    // Passive follower/acceptor
-    PAXOS_STATE_RECOVERING, // Phase 1: Candidate building a promise quorum
-    PAXOS_STATE_ACTIVE      // Phase 2: Stable Leader proposing new slots
+    PAXOS_STATE_LEARNER,          // Passive follower/acceptor
+    PAXOS_STATE_RECOVERING_PHASE1,// Candidate building a promise quorum
+    PAXOS_STATE_RECOVERING_PHASE2,// Leader re-proposing recovered gaps
+    PAXOS_STATE_ACTIVE            // Stable Leader serving clients
 } paxos_state_t;
 
 typedef enum {
     MSG_TICK,
     MSG_PROPOSE,
-    MSG_PREPARE,         // Phase 1 (Leader -> Acceptors)
-    MSG_PROMISE,         // Phase 1 (Acceptors -> Leader)
-    MSG_ACCEPT,          // Phase 2 (Leader -> Acceptors)
-    MSG_ACCEPTED,        // Phase 2 (Acceptors -> Leader)
-    MSG_NACK,            // Rejection containing highest promised ballot
-    MSG_COMMIT_NOTICE,   // Learner Catchup
+    MSG_PREPARE,
+    MSG_PROMISE,
+    MSG_ACCEPT,
+    MSG_ACCEPTED,
+    MSG_NACK,
+    MSG_COMMIT_NOTICE,
     MSG_READ_BARRIER,
     MSG_READ_BARRIER_RES
 } msg_type_t;
 
 typedef enum {
     ENTRY_NORMAL = 0,
-    ENTRY_NOOP = 1,      // Used to fill Paxos gaps during Phase 1 recovery
+    ENTRY_NOOP = 1,
     ENTRY_CONF_ADD = 2,
     ENTRY_CONF_REMOVE = 3
 } entry_type_t;
@@ -62,16 +61,12 @@ typedef struct {
     msg_type_t type;
     uint64_t to;
     uint64_t from;
-
-    uint64_t ballot;          // The active or proposed ballot
-    uint64_t promised_ballot; // Used in NACKs and Promises
-
-    uint64_t slot;            // The log index being targeted
-    uint64_t commit_index;    // Piggybacked chosen horizon
-
-    paxos_entry_t* entries;   // Suffix array for Promise, or single entry for Accept
+    uint64_t ballot;
+    uint64_t promised_ballot;
+    uint64_t slot;
+    uint64_t commit_index;
+    paxos_entry_t* entries;
     size_t num_entries;
-
     uint64_t read_seq;
     bool reject;
 } paxos_msg_t;
@@ -82,12 +77,29 @@ typedef struct {
 } paxos_read_state_t;
 
 typedef struct {
-    paxos_msg_t* messages;
-    size_t num_messages;
+    uint64_t promised_ballot;
+    uint64_t max_generated_ballot;
+    bool has_update;
+} paxos_hard_state_t;
+
+typedef struct {
+    // 1. MUST BE FSYNCED FIRST
+    paxos_hard_state_t hard_state;
     paxos_entry_t* entries_to_save;
     size_t num_entries_to_save;
+
+    // 2. SAFE TO SEND IMMEDIATELY (NACKs)
+    paxos_msg_t* messages_immediate;
+    size_t num_messages_immediate;
+
+    // 3. MUST WAIT UNTIL AFTER FSYNC TO SEND (Promises, Accepts, Accepteds)
+    paxos_msg_t* messages_after_persist;
+    size_t num_messages_after_persist;
+
+    // 4. SAFE TO APPLY TO STATE MACHINE
     paxos_entry_t* chosen_entries;
     size_t num_chosen_entries;
+
     paxos_read_state_t* read_states;
     size_t num_read_states;
 } paxos_ready_t;
@@ -99,12 +111,15 @@ void     paxos_destroy(paxos_t* p);
 
 void          paxos_step_local(paxos_t* p, paxos_msg_t* msg);
 void          paxos_step_remote(paxos_t* p, paxos_msg_t* msg);
+
 paxos_ready_t paxos_get_ready(paxos_t* p);
-void          paxos_advance(paxos_t* p, uint64_t saved_slot, uint64_t applied_slot);
+void          paxos_ready_destroy(paxos_ready_t* ready);
+void          paxos_advance(paxos_t* p, uint64_t stable_accepted_through, uint64_t applied_slot);
 
 paxos_state_t paxos_state(paxos_t* p);
 uint64_t      paxos_promised_ballot(paxos_t* p);
-uint64_t      paxos_commit_index(paxos_t* p);
+uint64_t      paxos_local_commit_index(paxos_t* p);
 uint64_t      paxos_last_slot(paxos_t* p);
+bool          paxos_has_fatal_error(paxos_t* p);
 
 #endif // PAXOS_H

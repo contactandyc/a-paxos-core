@@ -1,7 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
-//
-// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #define PAXOS_TESTING 1
 #include <stdio.h>
@@ -24,21 +22,20 @@ MACRO_TEST(paxos_campaign_generates_unique_ballot_and_broadcasts_prepare) {
     uint64_t peers[] = {2, 3};
     paxos_t* p = paxos_create(1, peers, 2);
 
-    // Force the node to initiate a leadership takeover
     extern void paxos_proposer_campaign(paxos_t* p);
     paxos_proposer_campaign(p);
 
-    MACRO_ASSERT_TRUE(paxos_state(p) == PAXOS_STATE_RECOVERING);
+    MACRO_ASSERT_TRUE(paxos_state(p) == PAXOS_STATE_RECOVERING_PHASE1);
 
-    // Ballot should be epoch 1 shifted left, OR'd with node ID 1
     uint64_t expected_ballot = (1ULL << 16) | 1;
     MACRO_ASSERT_EQ_INT(p->active_ballot, expected_ballot);
 
     paxos_ready_t ready = paxos_get_ready(p);
-    MACRO_ASSERT_EQ_INT(ready.num_messages, 2);
-    MACRO_ASSERT_TRUE(ready.messages[0].type == MSG_PREPARE);
-    MACRO_ASSERT_EQ_INT(ready.messages[0].ballot, expected_ballot);
+    MACRO_ASSERT_EQ_INT(ready.num_messages_after_persist, 2); // <--- FIXED
+    MACRO_ASSERT_TRUE(ready.messages_after_persist[0].type == MSG_PREPARE); // <--- FIXED
+    MACRO_ASSERT_EQ_INT(ready.messages_after_persist[0].ballot, expected_ballot); // <--- FIXED
 
+    paxos_ready_destroy(&ready); // <--- Add cleanup
     paxos_destroy(p);
 }
 
@@ -48,10 +45,8 @@ MACRO_TEST(paxos_phase1_merge_forces_noop_on_paxos_gap) {
 
     extern void paxos_proposer_campaign(paxos_t* p);
     paxos_proposer_campaign(p);
-    paxos_advance(p, 0, 0); // Clear outbound PREPAREs
+    paxos_advance(p, 0, 0);
 
-    // Simulate Node 2 returning a PROMISE with a sparse log.
-    // Node 2 accepted a value at slot 2, but has nothing at slot 1.
     paxos_entry_t recovered_e = {
         .slot = 2,
         .accepted_ballot = 5,
@@ -71,15 +66,16 @@ MACRO_TEST(paxos_phase1_merge_forces_noop_on_paxos_gap) {
 
     paxos_step_remote(p, &prom);
 
-    // Node 1 should now have a quorum (Self + Node 2) and become ACTIVE.
-    MACRO_ASSERT_TRUE(paxos_state(p) == PAXOS_STATE_ACTIVE);
+    // Because it recovered a gap, it should bypass PHASE2 and go straight to ACTIVE
+    // if there were no values recovered that needed to be re-proposed.
+    // However, it DID recover slot 2, so it should transition to RECOVERING_PHASE2,
+    // broadcast the ACCEPTs, and THEN transition to ACTIVE if it hits the end of the recovery buffer.
+    MACRO_ASSERT_TRUE(paxos_state(p) == PAXOS_STATE_RECOVERING_PHASE2);
 
-    // It MUST have generated a No-Op for slot 1 (the gap)
-    // and re-proposed the data for slot 2 under its own active ballot.
     paxos_ready_t ready = paxos_get_ready(p);
 
     // 2 messages for slot 1, 2 messages for slot 2 = 4 total outbound Accept messages
-    MACRO_ASSERT_EQ_INT(ready.num_messages, 4);
+    MACRO_ASSERT_EQ_INT(ready.num_messages_after_persist, 4); // <--- FIXED
 
     paxos_entry_t* log_slot1 = paxos_log_get(p, 1);
     paxos_entry_t* log_slot2 = paxos_log_get(p, 2);
@@ -94,6 +90,7 @@ MACRO_TEST(paxos_phase1_merge_forces_noop_on_paxos_gap) {
     MACRO_ASSERT_EQ_INT(log_slot2->accepted_ballot, p->active_ballot);
     MACRO_ASSERT_EQ_INT(log_slot2->data_len, 4);
 
+    paxos_ready_destroy(&ready); // <--- Add cleanup
     paxos_destroy(p);
 }
 
@@ -105,15 +102,12 @@ MACRO_TEST(paxos_phase1_merge_adopts_highest_ballot_value) {
     paxos_proposer_campaign(p);
     paxos_advance(p, 0, 0);
 
-    // Node 2 accepted "OLD" at ballot 5
     paxos_entry_t e2 = { .slot = 1, .accepted_ballot = 5, .type = ENTRY_NORMAL, .data = (uint8_t*)"OLD", .data_len = 3 };
     paxos_msg_t prom2 = { .type = MSG_PROMISE, .to = 1, .from = 2, .ballot = p->active_ballot, .entries = &e2, .num_entries = 1 };
 
-    // Node 3 accepted "NEW" at ballot 10
     paxos_entry_t e3 = { .slot = 1, .accepted_ballot = 10, .type = ENTRY_NORMAL, .data = (uint8_t*)"NEW", .data_len = 3 };
     paxos_msg_t prom3 = { .type = MSG_PROMISE, .to = 1, .from = 3, .ballot = p->active_ballot, .entries = &e3, .num_entries = 1 };
 
-    // Deliver Node 3's high ballot first, then Node 2's lower ballot to ensure the merge logic doesn't blindly overwrite
     paxos_step_remote(p, &prom3);
     paxos_step_remote(p, &prom2);
 

@@ -1,36 +1,30 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
-//
-// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #include "paxos_internal.h"
 #include <string.h>
 #include <stdlib.h>
 
-// Generates a NACK message containing the highest promised ballot
 static void reply_nack(paxos_t* p, paxos_msg_t* req) {
     paxos_msg_t res = {
         .type = MSG_NACK,
         .to = req->from,
         .promised_ballot = p->promised_ballot
     };
-    paxos_send_msg(p, res);
+    paxos_send_immediate(p, res); // NACKs do not need fsync
 }
 
-// ----------------------------------------------------------------------------
-// PHASE 1: PREPARE
-// ----------------------------------------------------------------------------
 static void handle_prepare(paxos_t* p, paxos_msg_t* msg) {
+    if (msg->ballot > p->last_observed_ballot) p->last_observed_ballot = msg->ballot;
+
     if (msg->ballot <= p->promised_ballot) {
         reply_nack(p, msg);
         return;
     }
 
-    // Bind the Acceptor to the new higher ballot
     p->promised_ballot = msg->ballot;
 
-    // Generate the Promise containing the accepted unchosen suffix
-    uint64_t start_slot = msg->slot; // first_uncommitted_slot requested by leader
+    uint64_t start_slot = msg->slot;
     if (start_slot <= p->snapshot_index) start_slot = p->snapshot_index + 1;
 
     size_t suffix_count = 0;
@@ -48,30 +42,43 @@ static void handle_prepare(paxos_t* p, paxos_msg_t* msg) {
         .entries = suffix,
         .num_entries = suffix_count
     };
-    paxos_send_msg(p, res);
+    // MUST persist promised_ballot before sending
+    paxos_send_after_persist(p, res);
 }
 
-// ----------------------------------------------------------------------------
-// PHASE 2: ACCEPT
-// ----------------------------------------------------------------------------
 static void handle_accept(paxos_t* p, paxos_msg_t* msg) {
+    if (msg->ballot > p->last_observed_ballot) p->last_observed_ballot = msg->ballot;
+
     if (msg->ballot < p->promised_ballot) {
         reply_nack(p, msg);
         return;
     }
 
-    // Acceptors must learn the leader's commit horizon
-    if (msg->commit_index > p->commit_index) {
-        p->commit_index = msg->commit_index;
+    if (msg->commit_index > p->leader_commit_hint) {
+        p->leader_commit_hint = msg->commit_index;
+        paxos_advance_local_commit(p);
+    }
+
+    if (msg->num_entries != 1) return;
+    paxos_entry_t* e = &msg->entries[0];
+
+    paxos_entry_t* existing = paxos_log_get(p, msg->slot);
+    if (existing) {
+        if (existing->accepted_ballot > msg->ballot) {
+            reply_nack(p, msg);
+            return;
+        }
+        // Strict Same-Ballot Consistency check
+        if (existing->accepted_ballot == msg->ballot) {
+            if (existing->data_len != e->data_len || (e->data_len > 0 && memcmp(existing->data, e->data, e->data_len) != 0)) {
+                p->fatal_error = true;
+                return;
+            }
+        }
     }
 
     p->promised_ballot = msg->ballot;
 
-    // Extract the single entry being proposed
-    if (msg->num_entries != 1) return;
-    paxos_entry_t* e = &msg->entries[0];
-
-    // Persist the Accepted Value to the sparse log
     if (!paxos_log_accept(p, msg->slot, msg->ballot, e->type, e->client_id, e->client_seq, e->data, e->data_len)) {
         return;
     }
@@ -82,7 +89,10 @@ static void handle_accept(paxos_t* p, paxos_msg_t* msg) {
         .ballot = msg->ballot,
         .slot = msg->slot
     };
-    paxos_send_msg(p, res);
+
+    // MUST persist accepted_ballot and accepted_value before sending
+    paxos_send_after_persist(p, res);
+    paxos_advance_local_commit(p);
 }
 
 void paxos_acceptor_step(paxos_t* p, paxos_msg_t* msg) {
@@ -94,7 +104,10 @@ void paxos_acceptor_step(paxos_t* p, paxos_msg_t* msg) {
             handle_accept(p, msg);
             break;
         case MSG_COMMIT_NOTICE:
-            if (msg->commit_index > p->commit_index) p->commit_index = msg->commit_index;
+            if (msg->commit_index > p->leader_commit_hint) {
+                p->leader_commit_hint = msg->commit_index;
+                paxos_advance_local_commit(p);
+            }
             break;
         default:
             break;
