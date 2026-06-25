@@ -50,7 +50,9 @@ typedef enum {
     ENTRY_NORMAL = 0,
     ENTRY_NOOP = 1,
     ENTRY_CONF_ADD = 2,
-    ENTRY_CONF_REMOVE = 3
+    ENTRY_CONF_REMOVE = 3,
+    ENTRY_CONF_JOINT = 254,  // NEW: Alpha-Window Joint Consensus
+    ENTRY_CONF_FINAL = 255   // NEW: Topology Finalization
 } entry_type_t;
 
 typedef struct {

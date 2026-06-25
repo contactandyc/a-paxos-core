@@ -13,12 +13,14 @@ static void force_active_leader(paxos_t* p) {
     extern void paxos_proposer_campaign(paxos_t* p);
     paxos_proposer_campaign(p);
     paxos_advance(p, 0, 0);
-    if (p->num_peers > 0) {
-        paxos_msg_t prom = { .type = MSG_PROMISE, .to = p->id, .from = p->peers[0], .ballot = p->active_ballot, .num_entries = 0 };
+    if (p->num_nodes > 1) {
+        uint64_t remote_peer = p->node_directory[1];
+
+        paxos_msg_t prom = { .type = MSG_PROMISE, .to = p->id, .from = remote_peer, .ballot = p->active_ballot, .num_entries = 0 };
         paxos_step_remote(p, &prom);
         paxos_advance(p, 0, 0);
 
-        paxos_msg_t ack = { .type = MSG_ACCEPTED, .to = p->id, .from = p->peers[0], .ballot = p->active_ballot, .slot = p->next_slot - 1 };
+        paxos_msg_t ack = { .type = MSG_ACCEPTED, .to = p->id, .from = remote_peer, .ballot = p->active_ballot, .slot = p->next_slot - 1 };
         paxos_step_remote(p, &ack);
         paxos_advance(p, 0, 0);
     }
