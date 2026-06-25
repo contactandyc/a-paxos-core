@@ -68,9 +68,25 @@ static void handle_promise(paxos_t* p, paxos_msg_t* msg) {
         // Paxos Core Safety Rule: ONLY adopt the value with the HIGHEST accepted ballot per slot.
         paxos_recovery_slot_t* r_slot = &p->recovery_buffer[e->slot];
         if (!r_slot->has_value || e->accepted_ballot > r_slot->highest_ballot_seen) {
+
+            // Free the previous payload if we are overwriting it with a higher ballot's value
+            if (r_slot->has_value && r_slot->recovered_value.data) {
+                free(r_slot->recovered_value.data);
+            }
+
             r_slot->highest_ballot_seen = e->accepted_ballot;
             r_slot->has_value = true;
-            r_slot->recovered_value = *e; // Shallow copy is fine until allocation
+            r_slot->recovered_value = *e;
+
+            // Deep copy the payload so paxos_destroy can safely free it
+            if (e->data_len > 0) {
+                r_slot->recovered_value.data = malloc(e->data_len);
+                if (r_slot->recovered_value.data) {
+                    memcpy(r_slot->recovered_value.data, e->data, e->data_len);
+                }
+            } else {
+                r_slot->recovered_value.data = NULL;
+            }
         }
     }
 

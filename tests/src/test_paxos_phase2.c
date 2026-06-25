@@ -126,13 +126,14 @@ MACRO_TEST(paxos_leader_steps_down_on_nack) {
 
     MACRO_ASSERT_EQ_INT(paxos_state(p), PAXOS_STATE_ACTIVE);
 
-    // Node 3 NACKs us because another leader has emerged with Ballot 99
-    paxos_msg_t nack = { .type = MSG_NACK, .to = 1, .from = 3, .promised_ballot = p->active_ballot + 10 };
+    // Node 3 NACKs us because another leader has emerged with a higher ballot
+    uint64_t higher_ballot = p->active_ballot + 10;
+    paxos_msg_t nack = { .type = MSG_NACK, .to = 1, .from = 3, .promised_ballot = higher_ballot };
     paxos_step_remote(p, &nack);
 
     // We must immediately revert to a passive learner
     MACRO_ASSERT_EQ_INT(paxos_state(p), PAXOS_STATE_LEARNER);
-    MACRO_ASSERT_EQ_INT(paxos_promised_ballot(p), 99);
+    MACRO_ASSERT_EQ_INT(paxos_promised_ballot(p), higher_ballot); // <-- Fixed assertion!
     MACRO_ASSERT_EQ_INT(p->leader_id, 0);
 
     paxos_destroy(p);
