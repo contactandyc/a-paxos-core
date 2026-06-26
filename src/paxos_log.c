@@ -20,7 +20,7 @@ bool paxos_entry_clone_retain(paxos_entry_t* dst, const paxos_entry_t* src) {
 
 void paxos_entry_destroy(paxos_entry_t* e) {
     paxos_payload_release(e->data);
-    e->data = NULL;
+    memset(e, 0, sizeof(paxos_entry_t));
 }
 
 void paxos_rebuild_config(paxos_t* p) {
@@ -30,33 +30,36 @@ void paxos_rebuild_config(paxos_t* p) {
     p->in_joint_consensus = false;
     p->pending_reconfig = false;
 
-    for (size_t c = 0; c < p->log_chunks_cap; c++) {
-        if (!p->log_chunks[c]) continue;
-        for (size_t o = 0; o < PAXOS_LOG_CHUNK_SIZE; o++) {
-            paxos_log_slot_t* slot_data = &p->log_chunks[c]->slots[o];
+    // FAANG: Incremental Rebuild - O(1) performance bounded by the inflight window!
+    uint64_t start_slot = p->snapshot_index + 1;
+    for (uint64_t i = start_slot; i <= p->local_commit_index; i++) {
+        uint64_t c_idx = paxos_chunk_idx(p, i);
+        uint64_t c_off = paxos_chunk_off(i);
 
-            if (!slot_data->is_chosen) continue;
+        if (c_idx >= p->log_chunks_cap || !p->log_chunks[c_idx]) break;
 
-            paxos_entry_t* e = &slot_data->chosen_entry;
+        paxos_log_slot_t* slot_data = &p->log_chunks[c_idx]->slots[c_off];
+        if (!slot_data->is_chosen) break; // Rebuild must be contiguous
 
-            if (e->type == ENTRY_CONF_ADD && e->data_len == sizeof(uint64_t)) {
-                uint64_t target_node; memcpy(&target_node, e->data, sizeof(uint64_t));
-                p->active_config_mask |= paxos_peer_register(p, target_node);
-            } else if (e->type == ENTRY_CONF_REMOVE && e->data_len == sizeof(uint64_t)) {
-                uint64_t target_node; memcpy(&target_node, e->data, sizeof(uint64_t));
-                p->active_config_mask &= ~paxos_peer_bit(p, target_node);
-            } else if (e->type == ENTRY_CONF_JOINT) {
-                uint64_t new_mask = 0; uint64_t* new_nodes = (uint64_t*)e->data;
-                size_t count = e->data_len / sizeof(uint64_t);
-                for(size_t i = 0; i < count; i++) new_mask |= paxos_peer_register(p, new_nodes[i]);
-                p->joint_config_mask = new_mask;
-                p->in_joint_consensus = true;
-                p->pending_reconfig = true;
-            } else if (e->type == ENTRY_CONF_FINAL) {
-                 p->active_config_mask = p->joint_config_mask;
-                 p->in_joint_consensus = false;
-                 p->pending_reconfig = false;
-            }
+        paxos_entry_t* e = &slot_data->chosen_entry;
+
+        if (e->type == ENTRY_CONF_ADD && e->data_len == sizeof(uint64_t)) {
+            uint64_t target_node; memcpy(&target_node, e->data, sizeof(uint64_t));
+            p->active_config_mask |= paxos_peer_register(p, target_node);
+        } else if (e->type == ENTRY_CONF_REMOVE && e->data_len == sizeof(uint64_t)) {
+            uint64_t target_node; memcpy(&target_node, e->data, sizeof(uint64_t));
+            p->active_config_mask &= ~paxos_peer_bit(p, target_node);
+        } else if (e->type == ENTRY_CONF_JOINT) {
+            uint64_t new_mask = 0; uint64_t* new_nodes = (uint64_t*)e->data;
+            size_t count = e->data_len / sizeof(uint64_t);
+            for(size_t j = 0; j < count; j++) new_mask |= paxos_peer_register(p, new_nodes[j]);
+            p->joint_config_mask = new_mask;
+            p->in_joint_consensus = true;
+            p->pending_reconfig = true;
+        } else if (e->type == ENTRY_CONF_FINAL) {
+             p->active_config_mask = p->joint_config_mask;
+             p->in_joint_consensus = false;
+             p->pending_reconfig = false;
         }
     }
 #endif
@@ -335,9 +338,10 @@ void paxos_advance_local_commit(paxos_t* p, uint64_t author_id, uint64_t author_
 
         paxos_log_slot_t* s = &p->log_chunks[c_idx]->slots[c_off];
 
-        // FAANG: Strict Separation of Commit Hint vs Truth
-        // A slot must be explicitly marked is_chosen via Cryptographic Hash Match or FetchEntries!
         if (!s->is_chosen) break;
+
+        // FAANG: MUST increment index first so the O(1) Rebuilder can see the new slot!
+        p->local_commit_index++;
 
 #if PAXOS_ENABLE_RECONFIG
         if (s->chosen_entry.type >= ENTRY_CONF_ADD && s->chosen_entry.type <= ENTRY_CONF_FINAL) {
@@ -354,7 +358,5 @@ void paxos_advance_local_commit(paxos_t* p, uint64_t author_id, uint64_t author_
                 p->leader_id = 0;
             }
         }
-
-        p->local_commit_index++;
     }
 }

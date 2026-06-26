@@ -1,7 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
-//
-// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #define PAXOS_TESTING 1
 #include <stdio.h>
@@ -9,7 +7,6 @@
 #include "paxos_internal.h"
 #include "the-macro-library/macro_test.h"
 
-// FAANG: Bring in the election simulator helper!
 static void force_active_leader(paxos_t* p) {
     extern void paxos_proposer_campaign(paxos_t* p);
     paxos_proposer_campaign(p);
@@ -47,14 +44,12 @@ MACRO_TEST(follower_receives_batched_accept_and_persists_correctly) {
 
     paxos_ready_t ready = paxos_get_ready(p);
 
-    // FAANG: The follower must compress 3 ACKs into exactly 1 packet!
     MACRO_ASSERT_EQ_INT(ready.num_messages_after_persist, 1);
     MACRO_ASSERT_EQ_INT(ready.messages_after_persist[0].type, MSG_ACCEPTED);
-    MACRO_ASSERT_EQ_INT(ready.messages_after_persist[0].slot, 5); // Starting slot
-    MACRO_ASSERT_EQ_INT(ready.messages_after_persist[0].num_entries, 3); // The range!
+    MACRO_ASSERT_EQ_INT(ready.messages_after_persist[0].slot, 5);
+    MACRO_ASSERT_EQ_INT(ready.messages_after_persist[0].num_entries, 3);
 
     paxos_ready_destroy(&ready);
-
     paxos_destroy(p);
 }
 
@@ -63,18 +58,17 @@ MACRO_TEST(propose_rejects_malformed_secondary_entries) {
     uint64_t peers[] = {1, 2, 3};
     paxos_t* p = paxos_create(1, peers, 3);
 
-    force_active_leader(p); // FIXED: Give the node quorum so it can propose!
+    force_active_leader(p);
 
     paxos_entry_t bad_batch[2] = {
-        { .type = ENTRY_NORMAL, .data = (uint8_t*)"A", .data_len = 1 }, // Valid
-        { .type = ENTRY_NORMAL, .data = NULL, .data_len = 10 }          // Invalid!
+        { .type = ENTRY_NORMAL, .data = (uint8_t*)"A", .data_len = 1 },
+        { .type = ENTRY_NORMAL, .data = NULL, .data_len = 10 }
     };
     paxos_msg_t prop = { .type = MSG_PROPOSE, .entries = bad_batch, .num_entries = 2 };
 
     paxos_step_local(p, &prop);
 
-    // The entire batch must be rejected at the firewall!
-    MACRO_ASSERT_EQ_INT(paxos_last_slot(p), 1); // Only the election NoOp exists
+    MACRO_ASSERT_EQ_INT(paxos_last_slot(p), 1);
 
     paxos_destroy(p);
 }
@@ -83,10 +77,8 @@ MACRO_TEST(add_node_must_not_duplicate_nodes_in_joint_payload) {
     uint64_t peers[] = {1, 2, 3};
     paxos_t* p = paxos_create(1, peers, 3);
 
-    force_active_leader(p); // FIXED: Give the node quorum so it can propose!
+    force_active_leader(p);
 
-    // Node 2 is ALREADY in the cluster. If we request an ADD for Node 2,
-    // the Morph must recognize it and prevent a duplicate in the JOINT array.
     uint64_t target = 2;
     paxos_entry_t e = { .type = ENTRY_CONF_ADD, .data = (uint8_t*)&target, .data_len = sizeof(uint64_t) };
     paxos_msg_t prop = { .type = MSG_PROPOSE, .entries = &e, .num_entries = 1 };
@@ -96,8 +88,37 @@ MACRO_TEST(add_node_must_not_duplicate_nodes_in_joint_payload) {
     paxos_entry_t* log_e = paxos_log_get(p, 2);
     MACRO_ASSERT_TRUE(log_e != NULL);
     MACRO_ASSERT_EQ_INT(log_e->type, ENTRY_CONF_JOINT);
-    MACRO_ASSERT_EQ_INT(log_e->data_len, 3 * sizeof(uint64_t)); // Still exactly 3 nodes, no duplicate added!
+    MACRO_ASSERT_EQ_INT(log_e->data_len, 3 * sizeof(uint64_t));
 
+    paxos_destroy(p);
+}
+
+MACRO_TEST(batched_accept_where_one_entry_fails_allocation_preserves_durable_state) {
+    uint64_t peers[] = {1, 2, 3};
+    paxos_t* p = paxos_create(1, peers, 3);
+    p->promised_ballot = 10;
+
+    paxos_entry_t batch[3] = {
+        { .type = ENTRY_NORMAL, .data = (uint8_t*)"A", .data_len = 1 },
+        { .type = ENTRY_NORMAL, .data = (uint8_t*)"B", .data_len = 1 },
+        { .type = ENTRY_NORMAL, .data = (uint8_t*)"C", .data_len = PAXOS_MAX_PAYLOAD_SIZE + 1 } // FATAL!
+    };
+
+    paxos_msg_t acc = { .type = MSG_ACCEPT, .to = 1, .from = 2, .ballot = 10, .slot = 5, .entries = batch, .num_entries = 3 };
+
+    // FAANG: Bypass the paxos_step_remote firewall to test raw inner-core memory boundaries
+    extern void paxos_acceptor_step(paxos_t* p, paxos_msg_t* msg);
+    paxos_acceptor_step(p, &acc);
+
+    MACRO_ASSERT_TRUE(paxos_log_get(p, 5) != NULL);
+    MACRO_ASSERT_TRUE(paxos_log_get(p, 6) != NULL);
+    MACRO_ASSERT_TRUE(paxos_log_get(p, 7) == NULL);
+
+    paxos_ready_t ready = paxos_get_ready(p);
+    MACRO_ASSERT_EQ_INT(ready.num_messages_after_persist, 1);
+    MACRO_ASSERT_EQ_INT(ready.messages_after_persist[0].num_entries, 2);
+
+    paxos_ready_destroy(&ready);
     paxos_destroy(p);
 }
 
@@ -107,6 +128,7 @@ int main(void) {
     MACRO_ADD(tests, follower_receives_batched_accept_and_persists_correctly);
     MACRO_ADD(tests, propose_rejects_malformed_secondary_entries);
     MACRO_ADD(tests, add_node_must_not_duplicate_nodes_in_joint_payload);
+    MACRO_ADD(tests, batched_accept_where_one_entry_fails_allocation_preserves_durable_state);
     macro_run_all("paxos_batching_and_validation", tests, test_count);
     return 0;
 }

@@ -16,6 +16,7 @@
 #define MAX_RECOVERY_GAP 100000
 #define PAXOS_ENABLE_RECONFIG 1
 #define PAXOS_LOG_CHUNK_SIZE 1024
+#define PAXOS_MAX_BATCH_BYTES 4194304 // FAANG: 4MB Max Batch Limit
 
 typedef struct {
     _Atomic uint32_t ref_count;
@@ -24,7 +25,9 @@ typedef struct {
 } paxos_rc_data_t;
 
 static inline uint8_t* paxos_payload_alloc(const uint8_t* data, size_t len) {
-    if (len == 0) return NULL;
+    // FAANG: Hard memory firewall. Prevents SIZE_MAX integer overflow and blocks multi-megabyte malicious payloads.
+    if (len == 0 || len > PAXOS_MAX_PAYLOAD_SIZE) return NULL;
+
     paxos_rc_data_t* rc = malloc(sizeof(paxos_rc_data_t) + len);
     if (!rc) return NULL;
     atomic_init(&rc->ref_count, 1);
@@ -89,12 +92,21 @@ typedef struct {
     bool eligible_to_vote;
 } paxos_learner_state_t;
 
+// FAANG: O(1) Hash Map Entry
+typedef struct {
+    uint64_t id;
+    uint8_t index;
+    bool active;
+} paxos_peer_map_entry_t;
+
 struct paxos_s {
     uint64_t id;
     paxos_state_t state;
 
     uint64_t node_directory[MAX_PEERS];
+    paxos_peer_map_entry_t peer_map[128]; // FAANG: O(1) Peer Lookup Map
     size_t num_nodes;
+
     uint64_t base_config_mask;
     uint64_t active_config_mask;
     uint64_t joint_config_mask;
@@ -192,22 +204,33 @@ static inline uint64_t paxos_chunk_off(uint64_t slot) {
     return slot % PAXOS_LOG_CHUNK_SIZE;
 }
 
+// FAANG: O(1) Lookup via Linear Probing Map
 static inline uint64_t paxos_peer_bit(paxos_t* p, uint64_t node_id) {
     if (node_id == 0) return 0;
-    for (size_t i = 0; i < p->num_nodes; i++) {
-        if (p->node_directory[i] == node_id) return 1ULL << i;
+    uint64_t start_idx = node_id % 128;
+    for (int i = 0; i < 128; i++) {
+        uint64_t idx = (start_idx + i) % 128;
+        if (p->peer_map[idx].active && p->peer_map[idx].id == node_id) return 1ULL << p->peer_map[idx].index;
+        if (!p->peer_map[idx].active) return 0;
     }
     return 0;
 }
 
+// FAANG: O(1) Registration
 static inline uint64_t paxos_peer_register(paxos_t* p, uint64_t node_id) {
     if (node_id == 0) return 0;
-    for (size_t i = 0; i < p->num_nodes; i++) {
-        if (p->node_directory[i] == node_id) return 1ULL << i;
-    }
-    if (p->num_nodes < MAX_PEERS) {
-        p->node_directory[p->num_nodes] = node_id;
-        return 1ULL << p->num_nodes++;
+    uint64_t start_idx = node_id % 128;
+    for (int i = 0; i < 128; i++) {
+        uint64_t idx = (start_idx + i) % 128;
+        if (p->peer_map[idx].active && p->peer_map[idx].id == node_id) return 1ULL << p->peer_map[idx].index;
+        if (!p->peer_map[idx].active) {
+            if (p->num_nodes >= MAX_PEERS) return 0;
+            p->peer_map[idx].active = true;
+            p->peer_map[idx].id = node_id;
+            p->peer_map[idx].index = p->num_nodes;
+            p->node_directory[p->num_nodes] = node_id;
+            return 1ULL << p->num_nodes++;
+        }
     }
     return 0;
 }
@@ -253,6 +276,17 @@ static inline uint64_t paxos_entry_hash(const paxos_entry_t* e) {
         }
     }
     return hash;
+}
+
+// FAANG: Secure Full-Batch Validation
+static inline uint64_t paxos_batch_hash(paxos_entry_t* entries, size_t num_entries) {
+    if (num_entries == 0 || !entries) return 0;
+    uint64_t cumulative_hash = 14695981039346656037ULL;
+    for (size_t k = 0; k < num_entries; k++) {
+        cumulative_hash ^= paxos_entry_hash(&entries[k]);
+        cumulative_hash *= 1099511628211ULL;
+    }
+    return cumulative_hash;
 }
 
 static inline void observe_higher_ballot(paxos_t* p, uint64_t b) {

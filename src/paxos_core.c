@@ -16,15 +16,18 @@ paxos_t* paxos_create(uint64_t id, uint64_t* peers, size_t num_peers) {
     p->id = id;
     p->state = PAXOS_STATE_LEARNER;
 
-    p->node_directory[0] = id;
-    p->num_nodes = 1;
-    p->active_config_mask = 1ULL << 0;
+    p->num_nodes = 0;
+    p->active_config_mask = 0;
     p->joint_config_mask = 0;
     p->in_joint_consensus = false;
     p->pending_reconfig = false;
     p->needs_conf_final = false;
 
-    for (size_t i = 0; i < num_peers; i++) p->active_config_mask |= paxos_peer_register(p, peers[i]);
+    // FAANG: Safely initialize the O(1) Map by explicitly registering self first
+    p->active_config_mask |= paxos_peer_register(p, id);
+    for (size_t i = 0; i < num_peers; i++) {
+        p->active_config_mask |= paxos_peer_register(p, peers[i]);
+    }
     p->base_config_mask = p->active_config_mask;
 
     // FAANG: Initialize the Explicit Learner Tracker for bootstrap nodes
@@ -256,7 +259,6 @@ void paxos_tick(paxos_t* p) {
         if (p->current_tick >= p->heartbeat_timeout) {
             p->current_tick = 0;
 
-            // FAANG: Hash the commit index during heartbeats
             paxos_entry_t* c_entry = paxos_log_get(p, p->local_commit_index);
             uint64_t hash = c_entry ? paxos_entry_hash(c_entry) : 0;
 
@@ -282,6 +284,9 @@ void paxos_tick(paxos_t* p) {
     }
 }
 
+// Forward declare to resolve scoping
+void paxos_step_local(paxos_t* p, paxos_msg_t* msg);
+
 static void process_auto_proposals(paxos_t* p) {
     if (p->needs_conf_final && p->state == PAXOS_STATE_ACTIVE && p->id == p->leader_id) {
         p->needs_conf_final = false;
@@ -294,17 +299,22 @@ static void process_auto_proposals(paxos_t* p) {
 void paxos_step_local(paxos_t* p, paxos_msg_t* msg) {
     if (p->fatal_error || !paxos_msg_is_valid(msg)) return;
     if (p->state != PAXOS_STATE_ACTIVE) return;
+
     if (p->active_ballot < p->promised_ballot) {
         p->state = PAXOS_STATE_LEARNER;
-        p->leader_id = 0; return;
+        p->leader_id = 0;
+        return;
     }
 
     if (msg->type == MSG_PROPOSE) {
         uint64_t batch_start_slot = p->next_slot;
         size_t batch_count = 0;
+        size_t batch_bytes = 0;
 
         for (size_t i = 0; i < msg->num_entries; i++) {
             paxos_entry_t proposal = msg->entries[i];
+
+            if (batch_bytes + proposal.data_len > PAXOS_MAX_BATCH_BYTES) break;
 
 #if PAXOS_ENABLE_RECONFIG
             uint64_t joint_nodes[MAX_PEERS];
@@ -324,7 +334,6 @@ void paxos_step_local(paxos_t* p, paxos_msg_t* msg) {
                 }
 
                 if (proposal.type == ENTRY_CONF_ADD) {
-                    // FAANG: Strict Learner Firewall - Explicit Promotion Check
                     if (!p->learner_state[t_idx].eligible_to_vote ||
                         p->learner_state[t_idx].caught_up_through < p->local_commit_index) {
                         continue;
@@ -366,6 +375,7 @@ void paxos_step_local(paxos_t* p, paxos_msg_t* msg) {
             inf->active = true;
 
             batch_count++;
+            batch_bytes += proposal.data_len;
 
             if (paxos_has_quorum(p, inf->ack_mask)) {
                 inf->chosen = true;
@@ -383,6 +393,10 @@ void paxos_step_local(paxos_t* p, paxos_msg_t* msg) {
 
         if (batch_count > 0 && p->num_nodes > 1) {
             uint64_t combined_mask = p->active_config_mask | p->joint_config_mask;
+
+            paxos_entry_t* c_entry = paxos_log_get(p, p->local_commit_index);
+            uint64_t hash = c_entry ? paxos_entry_hash(c_entry) : 0;
+
             for (size_t i = 0; i < p->num_nodes; i++) {
                 if (p->node_directory[i] != p->id && ((1ULL << i) & combined_mask)) {
 
@@ -396,6 +410,7 @@ void paxos_step_local(paxos_t* p, paxos_msg_t* msg) {
                         .ballot = p->active_ballot,
                         .slot = batch_start_slot,
                         .commit_index = p->local_commit_index,
+                        .value_hash = hash,
                         .entries = batch_arr,
                         .num_entries = batch_count
                     };

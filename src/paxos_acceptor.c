@@ -79,21 +79,18 @@ static void handle_accept(paxos_t* p, paxos_msg_t* msg) {
         p->promised_ballot = msg->ballot;
         p->leader_id = msg->from;
 
-        // FAANG: Sign the return payload
-        paxos_entry_t* highest_e = paxos_log_get_accepted(p, msg->slot + successful_accepts - 1);
-
         paxos_msg_t res = {
             .type = MSG_ACCEPTED,
             .to = msg->from,
             .ballot = msg->ballot,
             .slot = msg->slot,
             .num_entries = successful_accepts,
-            .value_hash = highest_e ? paxos_entry_hash(highest_e) : 0
+            // FAANG: Sign the full batch to match the Leader's expectations!
+            .value_hash = paxos_batch_hash(msg->entries, successful_accepts)
         };
         paxos_send_after_persist(p, res);
     }
 
-    // FAANG: Cryptographic Validation Fast-Path
     if (msg->commit_index > 0 && msg->value_hash != 0) {
         paxos_entry_t* local = paxos_log_get_accepted(p, msg->commit_index);
         if (local && paxos_entry_hash(local) == msg->value_hash) {
@@ -109,7 +106,6 @@ static void handle_accept(paxos_t* p, paxos_msg_t* msg) {
 static void handle_commit_notice(paxos_t* p, paxos_msg_t* msg) {
     if (msg->ballot < p->promised_ballot) return;
 
-    // FAANG: Cryptographic Validation Fast-Path
     if (msg->commit_index > 0 && msg->value_hash != 0) {
         paxos_entry_t* local = paxos_log_get_accepted(p, msg->commit_index);
         if (local && paxos_entry_hash(local) == msg->value_hash) {
@@ -138,6 +134,9 @@ static void handle_fetch_entries_res(paxos_t* p, paxos_msg_t* msg) {
         uint64_t c_off = paxos_chunk_off(s);
         if (c_idx >= p->log_chunks_cap || !p->log_chunks[c_idx] || !p->log_chunks[c_idx]->slots[c_off].is_chosen) break;
 
+        // FAANG: Increment index FIRST so the rebuild sees the new contiguous state!
+        p->local_commit_index++;
+
 #if PAXOS_ENABLE_RECONFIG
         if (p->log_chunks[c_idx]->slots[c_off].chosen_entry.type >= ENTRY_CONF_ADD &&
             p->log_chunks[c_idx]->slots[c_off].chosen_entry.type <= ENTRY_CONF_FINAL) {
@@ -152,7 +151,6 @@ static void handle_fetch_entries_res(paxos_t* p, paxos_msg_t* msg) {
                 p->leader_id = 0;
             }
         }
-        p->local_commit_index++;
     }
 
     check_and_fetch_gaps(p);

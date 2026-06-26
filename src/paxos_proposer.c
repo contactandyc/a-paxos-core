@@ -126,7 +126,9 @@ void paxos_proposer_campaign(paxos_t* p) {
 
 static void handle_promise(paxos_t* p, paxos_msg_t* msg) {
     observe_higher_ballot(p, msg->ballot);
-    if (p->state != PAXOS_STATE_RECOVERING_PHASE1 || msg->ballot != p->active_ballot) return;
+
+    if (msg->ballot != p->active_ballot) return;
+    if (p->state != PAXOS_STATE_RECOVERING_PHASE1 && p->state != PAXOS_STATE_RECOVERING_PHASE2) return;
 
     uint64_t peer_mask = paxos_peer_bit(p, msg->from);
     if (!(p->promise_mask & peer_mask)) {
@@ -135,15 +137,18 @@ static void handle_promise(paxos_t* p, paxos_msg_t* msg) {
         uint64_t recovery_start = p->local_commit_index + 1;
         for (size_t i = 0; i < msg->num_entries; i++) {
             paxos_entry_t* e = &msg->entries[i];
-            if (e->slot > p->recovery_max_slot) {
-                if (e->slot - recovery_start >= MAX_RECOVERY_GAP) {
+
+            if (e->slot >= recovery_start) {
+                uint64_t rel_idx = e->slot - recovery_start;
+
+                // FAANG: Restore the critical DOS protection firewall
+                if (rel_idx >= MAX_RECOVERY_GAP) {
                     p->fatal_error = true;
                     return;
                 }
 
-                p->recovery_max_slot = e->slot;
-                if (p->recovery_max_slot - recovery_start >= p->recovery_cap) {
-                    size_t new_cap = (p->recovery_max_slot - recovery_start) + 1024;
+                if (rel_idx >= p->recovery_cap) {
+                    size_t new_cap = rel_idx + 1024;
                     paxos_recovery_slot_t* new_buf = realloc(p->recovery_buffer, new_cap * sizeof(paxos_recovery_slot_t));
                     if (!new_buf) { p->fatal_error = true; return; }
                     for (size_t r = p->recovery_cap; r < new_cap; r++) {
@@ -154,11 +159,11 @@ static void handle_promise(paxos_t* p, paxos_msg_t* msg) {
                     p->recovery_buffer = new_buf;
                     p->recovery_cap = new_cap;
                 }
-            }
 
-            if (e->slot >= recovery_start) {
-                uint64_t rel_idx = e->slot - recovery_start;
+                if (e->slot > p->recovery_max_slot) p->recovery_max_slot = e->slot;
+
                 paxos_recovery_slot_t* r_slot = &p->recovery_buffer[rel_idx];
+
                 if (!r_slot->has_value || e->accepted_ballot > r_slot->highest_ballot_seen) {
                     r_slot->has_value = true;
                     r_slot->highest_ballot_seen = e->accepted_ballot;
@@ -167,7 +172,10 @@ static void handle_promise(paxos_t* p, paxos_msg_t* msg) {
                 }
             }
         }
-        check_promise_quorum_and_activate(p);
+
+        if (p->state == PAXOS_STATE_RECOVERING_PHASE1 && paxos_has_quorum(p, p->promise_mask)) {
+            check_promise_quorum_and_activate(p);
+        }
     }
 }
 
@@ -178,12 +186,20 @@ static void handle_accepted(paxos_t* p, paxos_msg_t* msg) {
     size_t count = msg->num_entries > 0 ? msg->num_entries : 1;
     uint64_t highest_slot = msg->slot + count - 1;
 
-    // FAANG: Cryptographically Validate the ACK
+    // FAANG: Cryptographically Validate the FULL BATCH ACK
     if (msg->value_hash != 0) {
-        paxos_entry_t* expected = paxos_log_get(p, highest_slot);
-        if (!expected || paxos_entry_hash(expected) != msg->value_hash) {
+        size_t out_count = 0;
+        paxos_entry_t* expected_batch = paxos_log_extract_range(p, msg->slot, highest_slot, &out_count);
+
+        if (!expected_batch || out_count != count || paxos_batch_hash(expected_batch, count) != msg->value_hash) {
+            if (expected_batch) {
+                for(size_t j=0; j<out_count; j++) paxos_entry_destroy(&expected_batch[j]);
+                free(expected_batch);
+            }
             return; // Drop! Split-brain or corrupted ACK!
         }
+        for(size_t j=0; j<out_count; j++) paxos_entry_destroy(&expected_batch[j]);
+        free(expected_batch);
     }
 
     size_t peer_idx = 0;
