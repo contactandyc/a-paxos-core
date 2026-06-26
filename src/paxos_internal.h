@@ -16,7 +16,7 @@
 #define MAX_RECOVERY_GAP 100000
 #define PAXOS_ENABLE_RECONFIG 1
 #define PAXOS_LOG_CHUNK_SIZE 1024
-#define PAXOS_MAX_BATCH_BYTES 4194304 // FAANG: 4MB Max Batch Limit
+#define PAXOS_MAX_BATCH_BYTES 4194304
 
 typedef struct {
     _Atomic uint32_t ref_count;
@@ -25,9 +25,7 @@ typedef struct {
 } paxos_rc_data_t;
 
 static inline uint8_t* paxos_payload_alloc(const uint8_t* data, size_t len) {
-    // FAANG: Hard memory firewall. Prevents SIZE_MAX integer overflow and blocks multi-megabyte malicious payloads.
     if (len == 0 || len > PAXOS_MAX_PAYLOAD_SIZE) return NULL;
-
     paxos_rc_data_t* rc = malloc(sizeof(paxos_rc_data_t) + len);
     if (!rc) return NULL;
     atomic_init(&rc->ref_count, 1);
@@ -92,11 +90,12 @@ typedef struct {
     bool eligible_to_vote;
 } paxos_learner_state_t;
 
-// FAANG: O(1) Hash Map Entry
+// FAANG: O(1) Hash Map Entry WITH Tombstones
 typedef struct {
     uint64_t id;
     uint8_t index;
     bool active;
+    bool tombstone;
 } paxos_peer_map_entry_t;
 
 struct paxos_s {
@@ -104,7 +103,7 @@ struct paxos_s {
     paxos_state_t state;
 
     uint64_t node_directory[MAX_PEERS];
-    paxos_peer_map_entry_t peer_map[128]; // FAANG: O(1) Peer Lookup Map
+    paxos_peer_map_entry_t peer_map[128];
     size_t num_nodes;
 
     uint64_t base_config_mask;
@@ -191,7 +190,11 @@ void paxos_send_after_persist(paxos_t* p, paxos_msg_t msg);
 
 bool paxos_entry_clone_deep(paxos_entry_t* dst, const paxos_entry_t* src);
 bool paxos_entry_clone_retain(paxos_entry_t* dst, const paxos_entry_t* src);
-void paxos_entry_destroy(paxos_entry_t* e);
+
+static inline void paxos_entry_destroy(paxos_entry_t* e) {
+    paxos_payload_release(e->data);
+    memset(e, 0, sizeof(paxos_entry_t));
+}
 
 static inline uint64_t paxos_chunk_idx(paxos_t* p, uint64_t slot) {
     uint64_t base_c = p->log_base_slot / PAXOS_LOG_CHUNK_SIZE;
@@ -204,35 +207,65 @@ static inline uint64_t paxos_chunk_off(uint64_t slot) {
     return slot % PAXOS_LOG_CHUNK_SIZE;
 }
 
-// FAANG: O(1) Lookup via Linear Probing Map
 static inline uint64_t paxos_peer_bit(paxos_t* p, uint64_t node_id) {
     if (node_id == 0) return 0;
     uint64_t start_idx = node_id % 128;
     for (int i = 0; i < 128; i++) {
         uint64_t idx = (start_idx + i) % 128;
         if (p->peer_map[idx].active && p->peer_map[idx].id == node_id) return 1ULL << p->peer_map[idx].index;
-        if (!p->peer_map[idx].active) return 0;
+        if (!p->peer_map[idx].active && !p->peer_map[idx].tombstone) return 0;
     }
     return 0;
 }
 
-// FAANG: O(1) Registration
 static inline uint64_t paxos_peer_register(paxos_t* p, uint64_t node_id) {
     if (node_id == 0) return 0;
     uint64_t start_idx = node_id % 128;
+    int insert_idx = -1;
+
     for (int i = 0; i < 128; i++) {
         uint64_t idx = (start_idx + i) % 128;
         if (p->peer_map[idx].active && p->peer_map[idx].id == node_id) return 1ULL << p->peer_map[idx].index;
-        if (!p->peer_map[idx].active) {
-            if (p->num_nodes >= MAX_PEERS) return 0;
-            p->peer_map[idx].active = true;
-            p->peer_map[idx].id = node_id;
-            p->peer_map[idx].index = p->num_nodes;
-            p->node_directory[p->num_nodes] = node_id;
-            return 1ULL << p->num_nodes++;
-        }
+        if (!p->peer_map[idx].active && insert_idx == -1) insert_idx = idx;
+        if (!p->peer_map[idx].active && !p->peer_map[idx].tombstone) break;
     }
-    return 0;
+
+    if (insert_idx == -1 || p->num_nodes >= MAX_PEERS) return 0;
+
+    // FAANG: Index Reclaiming Logic. Find the first empty bit in the 64-bit directory.
+    uint64_t used_indices = 0;
+    for(int i = 0; i < 128; i++) if (p->peer_map[i].active) used_indices |= (1ULL << p->peer_map[i].index);
+
+    uint8_t free_index = 64;
+    for(uint8_t i = 0; i < 64; i++) {
+        if (!(used_indices & (1ULL << i))) { free_index = i; break; }
+    }
+    if (free_index == 64) return 0;
+
+    p->peer_map[insert_idx].active = true;
+    p->peer_map[insert_idx].tombstone = false;
+    p->peer_map[insert_idx].id = node_id;
+    p->peer_map[insert_idx].index = free_index;
+    p->node_directory[free_index] = node_id;
+    p->num_nodes++;
+    return 1ULL << free_index;
+}
+
+// FAANG: Safely removes peers, freeing up their slot in the 64-bit mask for new scaling instances.
+static inline void paxos_peer_deregister(paxos_t* p, uint64_t node_id) {
+    if (node_id == 0) return;
+    uint64_t start_idx = node_id % 128;
+    for (int i = 0; i < 128; i++) {
+        uint64_t idx = (start_idx + i) % 128;
+        if (p->peer_map[idx].active && p->peer_map[idx].id == node_id) {
+            p->peer_map[idx].active = false;
+            p->peer_map[idx].tombstone = true;
+            p->node_directory[p->peer_map[idx].index] = 0;
+            p->num_nodes--;
+            return;
+        }
+        if (!p->peer_map[idx].active && !p->peer_map[idx].tombstone) return;
+    }
 }
 
 static inline bool paxos_has_quorum(paxos_t* p, uint64_t ack_mask) {
@@ -257,12 +290,13 @@ static inline bool paxos_entry_value_equal(const paxos_entry_t* a, const paxos_e
     return memcmp(a->data, b->data, a->data_len) == 0;
 }
 
-// FAANG: Cryptographic FNV-1a Hashing for Split-Brain immunity
 static inline uint64_t paxos_entry_hash(const paxos_entry_t* e) {
     if (!e) return 0;
     uint64_t hash = 14695981039346656037ULL;
 
-    uint64_t meta[4] = { e->slot, e->accepted_ballot, (uint64_t)e->type, e->client_id };
+    // FAANG BUG FIX: Do NOT hash the accepted_ballot!
+    // It changes during leader transitions and breaks Fast-Path Commits.
+    uint64_t meta[4] = { e->slot, (uint64_t)e->type, e->client_id, e->client_seq };
     uint8_t* p_bytes = (uint8_t*)meta;
     for (size_t i = 0; i < sizeof(meta); i++) {
         hash ^= p_bytes[i];
@@ -278,7 +312,6 @@ static inline uint64_t paxos_entry_hash(const paxos_entry_t* e) {
     return hash;
 }
 
-// FAANG: Secure Full-Batch Validation
 static inline uint64_t paxos_batch_hash(paxos_entry_t* entries, size_t num_entries) {
     if (num_entries == 0 || !entries) return 0;
     uint64_t cumulative_hash = 14695981039346656037ULL;

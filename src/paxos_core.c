@@ -23,19 +23,19 @@ paxos_t* paxos_create(uint64_t id, uint64_t* peers, size_t num_peers) {
     p->pending_reconfig = false;
     p->needs_conf_final = false;
 
-    // FAANG: Safely initialize the O(1) Map by explicitly registering self first
     p->active_config_mask |= paxos_peer_register(p, id);
     for (size_t i = 0; i < num_peers; i++) {
         p->active_config_mask |= paxos_peer_register(p, peers[i]);
     }
     p->base_config_mask = p->active_config_mask;
 
-    // FAANG: Initialize the Explicit Learner Tracker for bootstrap nodes
-    for (size_t i = 0; i < p->num_nodes; i++) {
-        p->learner_state[i].eligible_to_vote = true;
-        p->learner_state[i].snapshot_installed = true;
-        p->learner_state[i].hard_state_initialized = true;
-        p->learner_state[i].caught_up_through = 0;
+    for (size_t i = 0; i < MAX_PEERS; i++) {
+        if (p->node_directory[i] != 0) {
+            p->learner_state[i].eligible_to_vote = true;
+            p->learner_state[i].snapshot_installed = true;
+            p->learner_state[i].hard_state_initialized = true;
+            p->learner_state[i].caught_up_through = 0;
+        }
     }
 
     p->log_chunks_cap = 16;
@@ -112,10 +112,9 @@ paxos_t* paxos_restore(uint64_t id, uint64_t* peers, size_t num_peers,
     paxos_rebuild_config(p);
     p->num_unstable_slots = 0;
 
-    // FAANG: Catch-up the Explicit Learner Tracker upon restart
     uint64_t combined_mask = p->active_config_mask | p->joint_config_mask;
-    for (size_t i = 0; i < p->num_nodes; i++) {
-        if ((1ULL << i) & combined_mask) {
+    for (size_t i = 0; i < MAX_PEERS; i++) {
+        if (p->node_directory[i] != 0 && ((1ULL << i) & combined_mask)) {
             p->learner_state[i].eligible_to_vote = true;
             p->learner_state[i].snapshot_installed = true;
             p->learner_state[i].hard_state_initialized = true;
@@ -242,7 +241,7 @@ static bool paxos_msg_is_valid(paxos_msg_t* msg) {
 }
 
 static bool paxos_is_valid_peer(paxos_t* p, uint64_t from_id) {
-    for (size_t i = 0; i < p->num_nodes; i++) {
+    for (size_t i = 0; i < MAX_PEERS; i++) {
         if (p->node_directory[i] == from_id) {
             return true;
         }
@@ -263,8 +262,8 @@ void paxos_tick(paxos_t* p) {
             uint64_t hash = c_entry ? paxos_entry_hash(c_entry) : 0;
 
             uint64_t combined_mask = p->active_config_mask | p->joint_config_mask;
-            for (size_t i = 0; i < p->num_nodes; i++) {
-                if (p->node_directory[i] != p->id && ((1ULL << i) & combined_mask)) {
+            for (size_t i = 0; i < MAX_PEERS; i++) {
+                if (p->node_directory[i] != 0 && p->node_directory[i] != p->id && ((1ULL << i) & combined_mask)) {
                     paxos_msg_t beat = {
                         .type = MSG_TICK, .to = p->node_directory[i],
                         .ballot = p->active_ballot, .commit_index = p->local_commit_index,
@@ -284,7 +283,6 @@ void paxos_tick(paxos_t* p) {
     }
 }
 
-// Forward declare to resolve scoping
 void paxos_step_local(paxos_t* p, paxos_msg_t* msg);
 
 static void process_auto_proposals(paxos_t* p) {
@@ -325,12 +323,14 @@ void paxos_step_local(paxos_t* p, paxos_msg_t* msg) {
                 uint64_t target_node; memcpy(&target_node, proposal.data, sizeof(uint64_t));
                 size_t t_idx = 0; bool found = false;
 
-                for (size_t n = 0; n < p->num_nodes; n++) {
+                for (size_t n = 0; n < MAX_PEERS; n++) {
                     if (p->node_directory[n] == target_node) { t_idx = n; found = true; break; }
                 }
                 if (!found && p->num_nodes < MAX_PEERS) {
-                    p->node_directory[p->num_nodes] = target_node;
-                    t_idx = p->num_nodes++;
+                    paxos_peer_register(p, target_node);
+                    for (size_t n = 0; n < MAX_PEERS; n++) {
+                        if (p->node_directory[n] == target_node) { t_idx = n; break; }
+                    }
                 }
 
                 if (proposal.type == ENTRY_CONF_ADD) {
@@ -341,8 +341,9 @@ void paxos_step_local(paxos_t* p, paxos_msg_t* msg) {
                 }
 
                 size_t j_count = 0;
-                for(size_t n = 0; n < p->num_nodes; n++) {
+                for(size_t n = 0; n < MAX_PEERS; n++) {
                     uint64_t current = p->node_directory[n];
+                    if (current == 0) continue;
                     if (proposal.type == ENTRY_CONF_REMOVE && current == target_node) continue;
                     joint_nodes[j_count++] = current;
                 }
@@ -397,8 +398,8 @@ void paxos_step_local(paxos_t* p, paxos_msg_t* msg) {
             paxos_entry_t* c_entry = paxos_log_get(p, p->local_commit_index);
             uint64_t hash = c_entry ? paxos_entry_hash(c_entry) : 0;
 
-            for (size_t i = 0; i < p->num_nodes; i++) {
-                if (p->node_directory[i] != p->id && ((1ULL << i) & combined_mask)) {
+            for (size_t i = 0; i < MAX_PEERS; i++) {
+                if (p->node_directory[i] != 0 && p->node_directory[i] != p->id && ((1ULL << i) & combined_mask)) {
 
                     paxos_entry_t* batch_arr = calloc(batch_count, sizeof(paxos_entry_t));
                     for (size_t b = 0; b < batch_count; b++) {
@@ -626,7 +627,7 @@ bool paxos_set_snapshot_chunk(paxos_t* p, uint64_t peer_id, const uint8_t* data,
     if (p->fatal_error || p->state != PAXOS_STATE_ACTIVE) return false;
 
     size_t peer_idx = 0; bool found = false;
-    for (size_t i = 0; i < p->num_nodes; i++) {
+    for (size_t i = 0; i < MAX_PEERS; i++) {
         if (p->node_directory[i] == peer_id) { peer_idx = i; found = true; break; }
     }
     if (!found) return false;
