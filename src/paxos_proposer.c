@@ -38,10 +38,15 @@ static void merge_into_recovery(paxos_t* p, paxos_entry_t* e) {
 
 static void check_promise_quorum_and_activate(paxos_t* p) {
     if (paxos_has_quorum(p, p->promise_mask)) {
-        p->state = PAXOS_STATE_RECOVERING_PHASE2; p->leader_id = p->id;
+        p->state = PAXOS_STATE_RECOVERING_PHASE2;
+        p->leader_id = p->id;
 
-        for (uint64_t s = p->local_commit_index + 1; s <= p->recovery_max_slot; s++) {
-            uint64_t rel_idx = s - (p->local_commit_index + 1);
+        // FAANG: Freeze the recovery base index! Do not mutate it during the loop.
+        uint64_t recovery_start = p->local_commit_index + 1;
+        uint64_t deferred_commit_index = p->local_commit_index;
+
+        for (uint64_t s = recovery_start; s <= p->recovery_max_slot; s++) {
+            uint64_t rel_idx = s - recovery_start;
             paxos_recovery_slot_t* r_slot = &p->recovery_buffer[rel_idx];
 
             paxos_entry_t final_val = {0};
@@ -59,7 +64,10 @@ static void check_promise_quorum_and_activate(paxos_t* p) {
                 uint64_t c_idx = paxos_chunk_idx(p, s);
                 uint64_t c_off = paxos_chunk_off(s);
                 p->log_chunks[c_idx]->slots[c_off].chosen = true;
-                if (s > p->local_commit_index) p->local_commit_index = s;
+
+                // Track the highest chosen slot, but don't apply it to the live state yet
+                if (s > deferred_commit_index) deferred_commit_index = s;
+
                 p->leader_commit_hint = s;
                 r_inf->active = false;
             } else {
@@ -75,6 +83,9 @@ static void check_promise_quorum_and_activate(paxos_t* p) {
                 }
             }
         }
+
+        // FAANG: Safely apply the commit index AFTER the relative memory lookups are done
+        p->local_commit_index = deferred_commit_index;
         p->next_slot = p->recovery_max_slot + 1;
 
         if (p->local_commit_index >= p->recovery_max_slot) {

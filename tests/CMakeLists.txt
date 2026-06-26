@@ -488,6 +488,55 @@ endif()
 
 add_test(NAME test_paxos_joint_consensus COMMAND $<TARGET_FILE:test_paxos_joint_consensus>)
 # ==============================================================================
+# test_paxos_malformed_configs Target (Standard Test)
+# ==============================================================================
+add_executable(test_paxos_malformed_configs
+  src/test_paxos_malformed_configs.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_acceptor.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_core.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_log.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_proposer.c
+)
+
+target_include_directories(test_paxos_malformed_configs BEFORE PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../src
+  ${CMAKE_CURRENT_SOURCE_DIR}/../include
+)
+
+list(APPEND TEST_EXECUTABLES test_paxos_malformed_configs)
+
+set_target_properties(test_paxos_malformed_configs PROPERTIES
+  C_STANDARD 23
+  C_STANDARD_REQUIRED YES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+)
+
+target_link_libraries(test_paxos_malformed_configs PRIVATE the_macro_library::the_macro_library)
+target_link_libraries(test_paxos_malformed_configs PRIVATE a_paxos_core::a_paxos_core)
+
+if(M_LIB)
+  target_link_libraries(test_paxos_malformed_configs PRIVATE ${M_LIB})
+endif()
+
+if(MSVC)
+  target_compile_options(test_paxos_malformed_configs PRIVATE /W4 ${TEST_COMPILER_OPTS})
+else()
+  target_compile_options(test_paxos_malformed_configs PRIVATE -Wall -Wextra -Wpedantic ${TEST_COMPILER_OPTS})
+endif()
+
+if(A_ENABLE_COVERAGE)
+  if (CMAKE_C_COMPILER_ID MATCHES "Clang")
+    target_compile_options(test_paxos_malformed_configs PRIVATE -O0 -g -fprofile-instr-generate -fcoverage-mapping)
+    target_link_options(test_paxos_malformed_configs PRIVATE -fprofile-instr-generate -fcoverage-mapping)
+  elseif (CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(test_paxos_malformed_configs PRIVATE -O0 -g --coverage)
+    target_link_options(test_paxos_malformed_configs PRIVATE --coverage)
+  endif()
+endif()
+
+add_test(NAME test_paxos_malformed_configs COMMAND $<TARGET_FILE:test_paxos_malformed_configs>)
+# ==============================================================================
 # test_paxos_memory Target (Standard Test)
 # ==============================================================================
 add_executable(test_paxos_memory
