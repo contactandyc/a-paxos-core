@@ -255,10 +255,19 @@ void paxos_tick(paxos_t* p) {
     if (p->state == PAXOS_STATE_ACTIVE) {
         if (p->current_tick >= p->heartbeat_timeout) {
             p->current_tick = 0;
+
+            // FAANG: Hash the commit index during heartbeats
+            paxos_entry_t* c_entry = paxos_log_get(p, p->local_commit_index);
+            uint64_t hash = c_entry ? paxos_entry_hash(c_entry) : 0;
+
             uint64_t combined_mask = p->active_config_mask | p->joint_config_mask;
             for (size_t i = 0; i < p->num_nodes; i++) {
                 if (p->node_directory[i] != p->id && ((1ULL << i) & combined_mask)) {
-                    paxos_msg_t beat = { .type = MSG_TICK, .to = p->node_directory[i], .ballot = p->active_ballot, .commit_index = p->local_commit_index };
+                    paxos_msg_t beat = {
+                        .type = MSG_TICK, .to = p->node_directory[i],
+                        .ballot = p->active_ballot, .commit_index = p->local_commit_index,
+                        .value_hash = hash
+                    };
                     paxos_send_immediate(p, beat);
                 }
             }
