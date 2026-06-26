@@ -152,7 +152,9 @@ static void handle_accept(paxos_t* p, paxos_msg_t* msg) {
         reply_nack(p, msg); return;
     }
 
-    // FAANG: Fully implement Batch Acceptance for high-throughput mode!
+    size_t successful_accepts = 0;
+
+    // FAANG: Write the batch to disk, but do NOT send individual packets!
     for (size_t i = 0; i < msg->num_entries; i++) {
         paxos_entry_t* e = &msg->entries[i];
         uint64_t target_slot = msg->slot + i;
@@ -163,24 +165,32 @@ static void handle_accept(paxos_t* p, paxos_msg_t* msg) {
 
         paxos_entry_t* existing = paxos_log_get(p, target_slot);
         if (existing) {
-            if (existing->accepted_ballot > msg->ballot) { reply_nack(p, msg); return; }
+            if (existing->accepted_ballot > msg->ballot) break;
             if (existing->accepted_ballot == msg->ballot && !paxos_entry_value_equal(existing, e)) {
-                p->fatal_error = true;
-                return;
+                p->fatal_error = true; return;
             }
         }
 
-        p->promised_ballot = msg->ballot; p->leader_id = msg->from;
+        if (!paxos_log_accept(p, target_slot, msg->ballot, e->type, e->client_id, e->client_seq, e->data, e->data_len)) break;
+        successful_accepts++;
+    }
 
-        if (!paxos_log_accept(p, target_slot, msg->ballot, e->type, e->client_id, e->client_seq, e->data, e->data_len)) return;
+    // FAANG: The ACK Storm Fix. Send a single compressed packet for the entire batch.
+    if (successful_accepts > 0) {
+        p->promised_ballot = msg->ballot;
+        p->leader_id = msg->from;
 
-        // Ensure we explicitly ACK every slot in the batch
-        paxos_msg_t res = { .type = MSG_ACCEPTED, .to = msg->from, .ballot = msg->ballot, .slot = target_slot };
+        paxos_msg_t res = {
+            .type = MSG_ACCEPTED,
+            .to = msg->from,
+            .ballot = msg->ballot,
+            .slot = msg->slot,
+            .num_entries = successful_accepts // Compress the range into a single integer!
+        };
         paxos_send_after_persist(p, res);
     }
 
     if (msg->commit_index > p->leader_commit_hint) p->leader_commit_hint = msg->commit_index;
-
     paxos_advance_local_commit(p, msg->from, msg->ballot);
     check_and_fetch_gaps(p);
 }

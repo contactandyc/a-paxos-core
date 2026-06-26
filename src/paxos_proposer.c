@@ -234,82 +234,97 @@ static void handle_accepted(paxos_t* p, paxos_msg_t* msg) {
     observe_higher_ballot(p, msg->ballot);
     if ((p->state != PAXOS_STATE_ACTIVE && p->state != PAXOS_STATE_RECOVERING_PHASE2) || msg->ballot != p->active_ballot) return;
 
-    // FAANG: Track peer progress BEFORE the early return!
-    // Even if the slot is already committed locally, we MUST record that the learner saw it.
+    // FAANG: Support legacy 1-slot ACKs and new Bulk ACKs
+    size_t count = msg->num_entries > 0 ? msg->num_entries : 1;
+    uint64_t highest_slot = msg->slot + count - 1;
+
     size_t peer_idx = 0;
     for (size_t i = 0; i < p->num_nodes; i++) {
         if (p->node_directory[i] == msg->from) { peer_idx = i; break; }
     }
-    if (msg->slot > p->peer_match_index[peer_idx]) {
-        p->peer_match_index[peer_idx] = msg->slot;
+
+    // Update the Learner Firewall using the END of the batch range
+    if (highest_slot > p->peer_match_index[peer_idx]) {
+        p->peer_match_index[peer_idx] = highest_slot;
     }
-
-    // NOW we can drop it if it's an old slot we already committed
-    if (msg->slot <= p->local_commit_index) return;
-
-    paxos_entry_t* local = paxos_log_get(p, msg->slot);
-    if (!local || local->accepted_ballot != msg->ballot) return;
 
     uint64_t peer_mask = paxos_peer_bit(p, msg->from);
     if (peer_mask == 0) return;
 
-    paxos_inflight_slot_t* inf = &p->inflight[msg->slot % INFLIGHT_WINDOW];
-    if (inf->active && (inf->slot != msg->slot || inf->ballot != msg->ballot)) return;
+    bool newly_chosen = false;
 
-    if (!inf->active) {
-        inf->slot = msg->slot; inf->ballot = msg->ballot;
-        inf->ack_mask = 0; inf->chosen = false; inf->active = true;
+    // FAANG: Unwrap the Bulk ACK and update the inflight window for the whole range
+    for (size_t i = 0; i < count; i++) {
+        uint64_t s = msg->slot + i;
+        if (s <= p->local_commit_index) continue;
+
+        paxos_entry_t* local = paxos_log_get(p, s);
+        if (!local || local->accepted_ballot != msg->ballot) continue;
+
+        paxos_inflight_slot_t* inf = &p->inflight[s % INFLIGHT_WINDOW];
+        if (inf->active && (inf->slot != s || inf->ballot != msg->ballot)) continue;
+
+        if (!inf->active) {
+            inf->slot = s; inf->ballot = msg->ballot;
+            inf->ack_mask = 0; inf->chosen = false; inf->active = true;
+        }
+
+        if (!(inf->ack_mask & peer_mask)) {
+            inf->ack_mask |= peer_mask;
+            if (paxos_has_quorum(p, inf->ack_mask)) {
+                inf->chosen = true;
+                newly_chosen = true;
+            }
+        }
     }
 
-    if (!(inf->ack_mask & peer_mask)) {
-        inf->ack_mask |= peer_mask;
-        if (paxos_has_quorum(p, inf->ack_mask)) {
-            inf->chosen = true;
-            uint64_t highest_contiguous_chosen = p->local_commit_index;
-            while (highest_contiguous_chosen + 1 < p->next_slot) {
-                paxos_inflight_slot_t* next_inf = &p->inflight[(highest_contiguous_chosen + 1) % INFLIGHT_WINDOW];
-                if (next_inf->active && next_inf->slot == highest_contiguous_chosen + 1 && next_inf->ballot == p->active_ballot && next_inf->chosen) {
-                    uint64_t s = highest_contiguous_chosen + 1;
-                    uint64_t c_idx = paxos_chunk_idx(p, s);
-                    uint64_t c_off = paxos_chunk_off(s);
-                    if (c_idx < p->log_chunks_cap && p->log_chunks[c_idx] && p->log_chunks[c_idx]->slots[c_off].has_value) {
-                        p->log_chunks[c_idx]->slots[c_off].chosen = true;
-                    }
-                    highest_contiguous_chosen++; next_inf->active = false;
-                } else break;
-            }
+    // If ANY slot in the bulk range achieved quorum, attempt to advance the commit index
+    if (newly_chosen) {
+        uint64_t highest_contiguous_chosen = p->local_commit_index;
+        while (highest_contiguous_chosen + 1 < p->next_slot) {
+            paxos_inflight_slot_t* next_inf = &p->inflight[(highest_contiguous_chosen + 1) % INFLIGHT_WINDOW];
+            if (next_inf->active && next_inf->slot == highest_contiguous_chosen + 1 && next_inf->ballot == p->active_ballot && next_inf->chosen) {
+                uint64_t s = highest_contiguous_chosen + 1;
+                uint64_t c_idx = paxos_chunk_idx(p, s);
+                uint64_t c_off = paxos_chunk_off(s);
+                if (c_idx < p->log_chunks_cap && p->log_chunks[c_idx] && p->log_chunks[c_idx]->slots[c_off].has_value) {
+                    p->log_chunks[c_idx]->slots[c_off].chosen = true;
+                }
+                highest_contiguous_chosen++; next_inf->active = false;
+            } else break;
+        }
 
-            if (highest_contiguous_chosen > p->leader_commit_hint) {
-                p->leader_commit_hint = highest_contiguous_chosen; paxos_advance_local_commit(p, p->id, p->active_ballot);
-            }
+        if (highest_contiguous_chosen > p->leader_commit_hint) {
+            p->leader_commit_hint = highest_contiguous_chosen;
+            paxos_advance_local_commit(p, p->id, p->active_ballot);
+        }
 
-            if (p->state == PAXOS_STATE_RECOVERING_PHASE2 && p->local_commit_index >= p->recovery_max_slot) {
-                p->state = PAXOS_STATE_ACTIVE;
-                uint64_t noop_slot = p->next_slot++;
-                if (paxos_log_accept(p, noop_slot, p->active_ballot, ENTRY_NOOP, 0, 0, NULL, 0)) {
-                    paxos_inflight_slot_t* n_inf = &p->inflight[noop_slot % INFLIGHT_WINDOW];
-                    n_inf->slot = noop_slot; n_inf->ballot = p->active_ballot;
-                    n_inf->ack_mask = paxos_peer_bit(p, p->id);
-                    n_inf->chosen = false; n_inf->active = true;
+        if (p->state == PAXOS_STATE_RECOVERING_PHASE2 && p->local_commit_index >= p->recovery_max_slot) {
+            p->state = PAXOS_STATE_ACTIVE;
+            uint64_t noop_slot = p->next_slot++;
+            if (paxos_log_accept(p, noop_slot, p->active_ballot, ENTRY_NOOP, 0, 0, NULL, 0)) {
+                paxos_inflight_slot_t* n_inf = &p->inflight[noop_slot % INFLIGHT_WINDOW];
+                n_inf->slot = noop_slot; n_inf->ballot = p->active_ballot;
+                n_inf->ack_mask = paxos_peer_bit(p, p->id);
+                n_inf->chosen = false; n_inf->active = true;
 
-                    if (paxos_has_quorum(p, n_inf->ack_mask)) {
-                        n_inf->chosen = true;
-                        uint64_t c_idx = paxos_chunk_idx(p, noop_slot);
-                        uint64_t c_off = paxos_chunk_off(noop_slot);
-                        p->log_chunks[c_idx]->slots[c_off].chosen = true;
-                        p->local_commit_index = noop_slot; p->leader_commit_hint = noop_slot;
-                        n_inf->active = false;
-                    }
+                if (paxos_has_quorum(p, n_inf->ack_mask)) {
+                    n_inf->chosen = true;
+                    uint64_t c_idx = paxos_chunk_idx(p, noop_slot);
+                    uint64_t c_off = paxos_chunk_off(noop_slot);
+                    p->log_chunks[c_idx]->slots[c_off].chosen = true;
+                    p->local_commit_index = noop_slot; p->leader_commit_hint = noop_slot;
+                    n_inf->active = false;
+                }
 
-                    uint64_t combined_mask = p->active_config_mask | p->joint_config_mask;
-                    for(size_t j = 0; j < p->num_nodes; j++) {
-                        if (p->node_directory[j] != p->id && ((1ULL << j) & combined_mask)) {
-                            paxos_entry_t* safe_copy = malloc(sizeof(paxos_entry_t));
-                            if (safe_copy && paxos_entry_clone_retain(safe_copy, paxos_log_get(p, noop_slot))) {
-                                paxos_msg_t acc = { .type = MSG_ACCEPT, .ballot = p->active_ballot, .slot = noop_slot, .commit_index = p->local_commit_index, .entries = safe_copy, .num_entries = 1 };
-                                acc.to = p->node_directory[j]; paxos_send_after_persist(p, acc);
-                            } else { if (safe_copy) free(safe_copy); p->fatal_error = true; }
-                        }
+                uint64_t combined_mask = p->active_config_mask | p->joint_config_mask;
+                for(size_t j = 0; j < p->num_nodes; j++) {
+                    if (p->node_directory[j] != p->id && ((1ULL << j) & combined_mask)) {
+                        paxos_entry_t* safe_copy = malloc(sizeof(paxos_entry_t));
+                        if (safe_copy && paxos_entry_clone_retain(safe_copy, paxos_log_get(p, noop_slot))) {
+                            paxos_msg_t acc = { .type = MSG_ACCEPT, .ballot = p->active_ballot, .slot = noop_slot, .commit_index = p->local_commit_index, .entries = safe_copy, .num_entries = 1 };
+                            acc.to = p->node_directory[j]; paxos_send_after_persist(p, acc);
+                        } else { if (safe_copy) free(safe_copy); p->fatal_error = true; }
                     }
                 }
             }

@@ -46,12 +46,18 @@ MACRO_TEST(follower_receives_batched_accept_and_persists_correctly) {
     MACRO_ASSERT_TRUE(paxos_log_get(p, 7) != NULL);
 
     paxos_ready_t ready = paxos_get_ready(p);
-    // Follower must queue 3 separate MSG_ACCEPTED replies for the proposer
-    MACRO_ASSERT_EQ_INT(ready.num_messages_after_persist, 3);
+
+    // FAANG: The follower must compress 3 ACKs into exactly 1 packet!
+    MACRO_ASSERT_EQ_INT(ready.num_messages_after_persist, 1);
+    MACRO_ASSERT_EQ_INT(ready.messages_after_persist[0].type, MSG_ACCEPTED);
+    MACRO_ASSERT_EQ_INT(ready.messages_after_persist[0].slot, 5); // Starting slot
+    MACRO_ASSERT_EQ_INT(ready.messages_after_persist[0].num_entries, 3); // The range!
+
     paxos_ready_destroy(&ready);
 
     paxos_destroy(p);
 }
+
 
 MACRO_TEST(propose_rejects_malformed_secondary_entries) {
     uint64_t peers[] = {1, 2, 3};
