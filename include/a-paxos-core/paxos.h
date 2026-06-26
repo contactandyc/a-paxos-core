@@ -99,6 +99,10 @@ typedef struct {
 typedef struct {
     uint64_t promised_ballot;
     uint64_t max_generated_ballot;
+    // FAANG: Durable Configuration Metadata
+    uint64_t active_config_mask;
+    uint64_t joint_config_mask;
+    bool pending_reconfig;
     bool has_update;
 } paxos_hard_state_t;
 
@@ -170,5 +174,8 @@ uint64_t      paxos_local_commit_index(paxos_t* p);
 uint64_t      paxos_snapshot_index(paxos_t* p);
 uint64_t      paxos_last_slot(paxos_t* p);
 bool          paxos_has_fatal_error(paxos_t* p);
+
+// Explicitly wake up a new node:
+void paxos_register_learner(paxos_t* p, uint64_t node_id);
 
 #endif // PAXOS_H

@@ -488,6 +488,55 @@ endif()
 
 add_test(NAME test_paxos_joint_consensus COMMAND $<TARGET_FILE:test_paxos_joint_consensus>)
 # ==============================================================================
+# test_paxos_learner_firewall Target (Standard Test)
+# ==============================================================================
+add_executable(test_paxos_learner_firewall
+  src/test_paxos_learner_firewall.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_acceptor.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_core.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_log.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/paxos_proposer.c
+)
+
+target_include_directories(test_paxos_learner_firewall BEFORE PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../src
+  ${CMAKE_CURRENT_SOURCE_DIR}/../include
+)
+
+list(APPEND TEST_EXECUTABLES test_paxos_learner_firewall)
+
+set_target_properties(test_paxos_learner_firewall PROPERTIES
+  C_STANDARD 23
+  C_STANDARD_REQUIRED YES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+)
+
+target_link_libraries(test_paxos_learner_firewall PRIVATE the_macro_library::the_macro_library)
+target_link_libraries(test_paxos_learner_firewall PRIVATE a_paxos_core::a_paxos_core)
+
+if(M_LIB)
+  target_link_libraries(test_paxos_learner_firewall PRIVATE ${M_LIB})
+endif()
+
+if(MSVC)
+  target_compile_options(test_paxos_learner_firewall PRIVATE /W4 ${TEST_COMPILER_OPTS})
+else()
+  target_compile_options(test_paxos_learner_firewall PRIVATE -Wall -Wextra -Wpedantic ${TEST_COMPILER_OPTS})
+endif()
+
+if(A_ENABLE_COVERAGE)
+  if (CMAKE_C_COMPILER_ID MATCHES "Clang")
+    target_compile_options(test_paxos_learner_firewall PRIVATE -O0 -g -fprofile-instr-generate -fcoverage-mapping)
+    target_link_options(test_paxos_learner_firewall PRIVATE -fprofile-instr-generate -fcoverage-mapping)
+  elseif (CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(test_paxos_learner_firewall PRIVATE -O0 -g --coverage)
+    target_link_options(test_paxos_learner_firewall PRIVATE --coverage)
+  endif()
+endif()
+
+add_test(NAME test_paxos_learner_firewall COMMAND $<TARGET_FILE:test_paxos_learner_firewall>)
+# ==============================================================================
 # test_paxos_malformed_configs Target (Standard Test)
 # ==============================================================================
 add_executable(test_paxos_malformed_configs

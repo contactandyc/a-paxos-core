@@ -1,9 +1,16 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
-//
-// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #include "paxos_internal.h"
+
+// FAANG: Explicit Learner Registration API
+void paxos_register_learner(paxos_t* p, uint64_t node_id) {
+    if (!p || p->num_nodes >= MAX_PEERS) return;
+    for (size_t i = 0; i < p->num_nodes; i++) {
+        if (p->node_directory[i] == node_id) return;
+    }
+    p->node_directory[p->num_nodes++] = node_id;
+}
 
 paxos_t* paxos_create(uint64_t id, uint64_t* peers, size_t num_peers) {
     if (id == 0 || num_peers > MAX_PEERS - 1) return NULL;
@@ -59,6 +66,15 @@ paxos_t* paxos_restore(uint64_t id, uint64_t* peers, size_t num_peers,
     p->max_generated_ballot = hard_state.max_generated_ballot;
     p->prev_hard_state = hard_state;
 
+    // FAANG: Restore Durable Configuration from Hard State!
+    if (hard_state.active_config_mask != 0) {
+        p->active_config_mask = hard_state.active_config_mask;
+        p->joint_config_mask = hard_state.joint_config_mask;
+        p->pending_reconfig = hard_state.pending_reconfig;
+        p->in_joint_consensus = (p->joint_config_mask != 0);
+        p->base_config_mask = p->in_joint_consensus ? p->joint_config_mask : p->active_config_mask;
+    }
+
     p->snapshot_index = snapshot_index;
     p->local_commit_index = local_commit_index;
     p->leader_commit_hint = local_commit_index;
@@ -85,7 +101,7 @@ paxos_t* paxos_restore(uint64_t id, uint64_t* peers, size_t num_peers,
 
     paxos_rebuild_config(p);
 
-    // FAANG: Clear unstable vector since restored slots are already persisted on disk
+    // Clear unstable vector since restored slots are already persisted on disk
     p->num_unstable_slots = 0;
 
     return p;
@@ -165,10 +181,10 @@ static bool validate_entry(paxos_entry_t* e) {
     if (e->data_len > PAXOS_MAX_PAYLOAD_SIZE) return false;
     if (e->data_len > 0 && !e->data) return false;
 
-    // Validate ADD/REMOVE (Must be exactly one uint64_t)
+    // Validate ADD/REMOVE
     if ((e->type == ENTRY_CONF_ADD || e->type == ENTRY_CONF_REMOVE) && e->data_len != sizeof(uint64_t)) return false;
 
-    // FAANG: Strict JOINT validation (Must be valid array, no zeroes, no duplicates)
+    // FAANG: Strict JOINT validation
     if (e->type == ENTRY_CONF_JOINT) {
         if (e->data_len == 0 || e->data_len % sizeof(uint64_t) != 0) return false;
 
@@ -184,7 +200,7 @@ static bool validate_entry(paxos_entry_t* e) {
         }
     }
 
-    // FAANG: Strict FINAL validation (Must have exactly 0 bytes of payload)
+    // FAANG: Strict FINAL validation
     if (e->type == ENTRY_CONF_FINAL && e->data_len != 0) return false;
 
     return true;
@@ -211,8 +227,8 @@ static bool paxos_msg_is_valid(paxos_msg_t* msg) {
 static bool paxos_is_valid_peer(paxos_t* p, uint64_t from_id) {
     for (size_t i = 0; i < p->num_nodes; i++) {
         if (p->node_directory[i] == from_id) {
-            uint64_t mask = 1ULL << i;
-            return (p->active_config_mask & mask) || (p->joint_config_mask & mask);
+            // FAANG: Allow silent learners to communicate and catch up!
+            return true;
         }
     }
     return false;
@@ -270,25 +286,36 @@ void paxos_step_local(paxos_t* p, paxos_msg_t* msg) {
             paxos_entry_t proposal = msg->entries[i];
 
 #if PAXOS_ENABLE_RECONFIG
-            uint64_t joint_nodes[MAX_PEERS]; // Safe local stack buffer
+            uint64_t joint_nodes[MAX_PEERS];
 
-            // FAANG: Phase 1 of Joint Consensus - The Morph!
             if (proposal.type == ENTRY_CONF_ADD || proposal.type == ENTRY_CONF_REMOVE) {
                 if (p->pending_reconfig) continue; // Drop to enforce Alpha-Window
 
                 uint64_t target_node; memcpy(&target_node, proposal.data, sizeof(uint64_t));
-                size_t j_count = 0;
-                bool found = false;
+                size_t t_idx = 0; bool found = false;
 
-                for(size_t n = 0; n < p->num_nodes; n++) {
-                    uint64_t current = p->node_directory[n];
-                    if (current == target_node) found = true;
-                    if (proposal.type == ENTRY_CONF_REMOVE && current == target_node) continue;
-                    joint_nodes[j_count++] = current;
+                // Implicitly add them as a silent Learner so they start getting heartbeats
+                for (size_t n = 0; n < p->num_nodes; n++) {
+                    if (p->node_directory[n] == target_node) { t_idx = n; found = true; break; }
+                }
+                if (!found && p->num_nodes < MAX_PEERS) {
+                    p->node_directory[p->num_nodes] = target_node;
+                    t_idx = p->num_nodes++;
                 }
 
-                if (proposal.type == ENTRY_CONF_ADD && !found && j_count < MAX_PEERS) {
-                    joint_nodes[j_count++] = target_node;
+                // FAANG: The Learner Liveness Firewall
+                if (proposal.type == ENTRY_CONF_ADD) {
+                    if (p->peer_match_index[t_idx] == 0 ||
+                       (p->local_commit_index > 100 && p->peer_match_index[t_idx] < p->local_commit_index - 100)) {
+                        continue; // Drop the proposal! They aren't ready to vote.
+                    }
+                }
+
+                size_t j_count = 0;
+                for(size_t n = 0; n < p->num_nodes; n++) {
+                    uint64_t current = p->node_directory[n];
+                    if (proposal.type == ENTRY_CONF_REMOVE && current == target_node) continue;
+                    joint_nodes[j_count++] = current;
                 }
 
                 proposal.type = ENTRY_CONF_JOINT;
@@ -387,8 +414,16 @@ paxos_ready_t paxos_get_ready(paxos_t* p) {
 
     ready.hard_state.promised_ballot = p->promised_ballot;
     ready.hard_state.max_generated_ballot = p->max_generated_ballot;
+
+    // FAANG: Export Durable Configuration
+    ready.hard_state.active_config_mask = p->active_config_mask;
+    ready.hard_state.joint_config_mask = p->joint_config_mask;
+    ready.hard_state.pending_reconfig = p->pending_reconfig;
+
     ready.hard_state.has_update = (p->promised_ballot != p->prev_hard_state.promised_ballot) ||
-                                  (p->max_generated_ballot != p->prev_hard_state.max_generated_ballot);
+                                  (p->max_generated_ballot != p->prev_hard_state.max_generated_ballot) ||
+                                  (p->active_config_mask != p->prev_hard_state.active_config_mask) ||
+                                  (p->joint_config_mask != p->prev_hard_state.joint_config_mask);
 
     ready.entries_to_save = paxos_log_extract_unstable(p, &ready.num_entries_to_save);
     ready.messages_immediate = p->msg_queue_immediate;
@@ -473,6 +508,9 @@ void paxos_advance(paxos_t* p, const uint64_t* stable_slots, size_t num_stable_s
 
     p->prev_hard_state.promised_ballot = p->promised_ballot;
     p->prev_hard_state.max_generated_ballot = p->max_generated_ballot;
+    p->prev_hard_state.active_config_mask = p->active_config_mask;
+    p->prev_hard_state.joint_config_mask = p->joint_config_mask;
+    p->prev_hard_state.pending_reconfig = p->pending_reconfig;
 
     for (size_t i = 0; i < p->msg_queue_immediate_len; i++) {
         if (p->msg_queue_immediate[i].type == MSG_INSTALL_SNAPSHOT && p->msg_queue_immediate[i].snapshot_data) {

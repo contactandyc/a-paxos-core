@@ -1,7 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
-//
-// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #define PAXOS_TESTING 1
 #include <stdio.h>
@@ -15,7 +13,6 @@ static void force_active_leader(paxos_t* p) {
     paxos_advance(p, NULL, 0, 0);
     if (p->num_nodes > 1) {
         uint64_t remote_peer = p->node_directory[1];
-
         paxos_msg_t prom = { .type = MSG_PROMISE, .to = p->id, .from = remote_peer, .ballot = p->active_ballot, .num_entries = 0 };
         paxos_step_remote(p, &prom);
         paxos_advance(p, NULL, 0, 0);
@@ -26,22 +23,22 @@ static void force_active_leader(paxos_t* p) {
     }
 }
 
-// FIXED: Now tests that the engine safely accepts the config and engages the Alpha-Window lock
 MACRO_TEST(paxos_safely_accepts_config_and_engages_lock) {
     uint64_t peers[] = {2, 3};
     paxos_t* p = paxos_create(1, peers, 2);
     force_active_leader(p);
 
     uint64_t new_node = 4;
+    paxos_register_learner(p, new_node);
+    paxos_msg_t catch_up_ack = { .type = MSG_ACCEPTED, .to = 1, .from = 4, .ballot = p->active_ballot, .slot = 1 };
+    paxos_step_remote(p, &catch_up_ack);
+
     paxos_entry_t e_conf = { .type = ENTRY_CONF_ADD, .data = (uint8_t*)&new_node, .data_len = sizeof(uint64_t) };
     paxos_msg_t p_conf = { .type = MSG_PROPOSE, .entries = &e_conf, .num_entries = 1 };
 
     paxos_step_local(p, &p_conf);
 
-    // The proposal was successful! (Slot 1 is the NoOp, Slot 2 is the Config)
     MACRO_ASSERT_EQ_INT(paxos_last_slot(p), 2);
-
-    // The Alpha-Window Joint Consensus lock MUST be engaged to prevent concurrent topology changes
     MACRO_ASSERT_TRUE(p->pending_reconfig == true);
 
     paxos_destroy(p);

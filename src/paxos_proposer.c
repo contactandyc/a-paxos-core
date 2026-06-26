@@ -233,6 +233,18 @@ static void handle_promise(paxos_t* p, paxos_msg_t* msg) {
 static void handle_accepted(paxos_t* p, paxos_msg_t* msg) {
     observe_higher_ballot(p, msg->ballot);
     if ((p->state != PAXOS_STATE_ACTIVE && p->state != PAXOS_STATE_RECOVERING_PHASE2) || msg->ballot != p->active_ballot) return;
+
+    // FAANG: Track peer progress BEFORE the early return!
+    // Even if the slot is already committed locally, we MUST record that the learner saw it.
+    size_t peer_idx = 0;
+    for (size_t i = 0; i < p->num_nodes; i++) {
+        if (p->node_directory[i] == msg->from) { peer_idx = i; break; }
+    }
+    if (msg->slot > p->peer_match_index[peer_idx]) {
+        p->peer_match_index[peer_idx] = msg->slot;
+    }
+
+    // NOW we can drop it if it's an old slot we already committed
     if (msg->slot <= p->local_commit_index) return;
 
     paxos_entry_t* local = paxos_log_get(p, msg->slot);

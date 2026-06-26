@@ -126,6 +126,8 @@ struct paxos_s {
     uint64_t next_slot;
     uint64_t leader_id;
 
+    uint64_t peer_match_index[MAX_PEERS];
+
     uint64_t promise_mask;
     bool self_promised;
 
