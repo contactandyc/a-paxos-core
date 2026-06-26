@@ -1,7 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
-//
-// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #ifndef PAXOS_H
 #define PAXOS_H
@@ -42,8 +40,8 @@ typedef enum {
     MSG_READ_BARRIER_RES,
     MSG_FETCH_ENTRIES,
     MSG_FETCH_ENTRIES_RES,
-    MSG_INSTALL_SNAPSHOT,      // <-- NEW: Leader streams snapshot chunk
-    MSG_INSTALL_SNAPSHOT_RES   // <-- NEW: Follower acknowledges chunk
+    MSG_INSTALL_SNAPSHOT,
+    MSG_INSTALL_SNAPSHOT_RES
 } msg_type_t;
 
 typedef enum {
@@ -51,8 +49,8 @@ typedef enum {
     ENTRY_NOOP = 1,
     ENTRY_CONF_ADD = 2,
     ENTRY_CONF_REMOVE = 3,
-    ENTRY_CONF_JOINT = 254,  // NEW: Alpha-Window Joint Consensus
-    ENTRY_CONF_FINAL = 255   // NEW: Topology Finalization
+    ENTRY_CONF_JOINT = 254,
+    ENTRY_CONF_FINAL = 255
 } entry_type_t;
 
 typedef struct {
@@ -82,7 +80,9 @@ typedef struct {
     size_t num_entries;
     uint64_t read_seq;
 
-    // NEW: Snapshot streaming metadata
+    // FAANG: Cryptographic Validation Signature
+    uint64_t value_hash;
+
     uint8_t* snapshot_data;
     size_t snapshot_len;
     uint64_t snapshot_offset;
@@ -99,7 +99,6 @@ typedef struct {
 typedef struct {
     uint64_t promised_ballot;
     uint64_t max_generated_ballot;
-    // FAANG: Durable Configuration Metadata
     uint64_t active_config_mask;
     uint64_t joint_config_mask;
     bool pending_reconfig;
@@ -123,7 +122,6 @@ typedef struct {
     paxos_read_state_t* read_states;
     size_t num_read_states;
 
-    // NEW: Snapshot receiver commands for the host application
     bool install_snapshot;
     uint64_t snapshot_slot;
     uint64_t snapshot_ballot;
@@ -143,18 +141,14 @@ paxos_t* paxos_restore(uint64_t id, uint64_t* peers, size_t num_peers,
                        paxos_restored_entry_t* entries, size_t num_entries);
 
 void     paxos_destroy(paxos_t* p);
-
 void          paxos_step_local(paxos_t* p, paxos_msg_t* msg);
 void          paxos_step_remote(paxos_t* p, paxos_msg_t* msg);
-
 void paxos_tick(paxos_t* p);
 
 paxos_ready_t paxos_get_ready(paxos_t* p);
 void          paxos_ready_destroy(paxos_ready_t* ready);
 void paxos_advance(paxos_t* p, const uint64_t* stable_slots, size_t num_stable_slots, uint64_t applied_slot);
 
-// Provides snapshot data chunks to the core for replication to a follower.
-// The host application calls this when intercepting an empty MSG_INSTALL_SNAPSHOT.
 bool paxos_set_snapshot_chunk(
     paxos_t* p,
     uint64_t peer_id,
@@ -164,7 +158,6 @@ bool paxos_set_snapshot_chunk(
     bool done
 );
 
-// NEW: Core Snapshot Mechanics
 void          paxos_compact(paxos_t* p, uint64_t compact_slot);
 void          paxos_snapshot_acked(paxos_t* p, bool success);
 
@@ -175,7 +168,6 @@ uint64_t      paxos_snapshot_index(paxos_t* p);
 uint64_t      paxos_last_slot(paxos_t* p);
 bool          paxos_has_fatal_error(paxos_t* p);
 
-// Explicitly wake up a new node:
 void paxos_register_learner(paxos_t* p, uint64_t node_id);
 
 #endif // PAXOS_H

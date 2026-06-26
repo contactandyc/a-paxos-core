@@ -38,7 +38,13 @@ static void check_promise_quorum_and_activate(paxos_t* p) {
                     if (p->node_directory[j] != p->id && ((1ULL << j) & combined_mask)) {
                         paxos_entry_t* safe_copy = malloc(sizeof(paxos_entry_t));
                         if (safe_copy && paxos_entry_clone_retain(safe_copy, paxos_log_get(p, s))) {
-                            paxos_msg_t acc = { .type = MSG_ACCEPT, .ballot = p->active_ballot, .slot = s, .commit_index = p->local_commit_index, .entries = safe_copy, .num_entries = 1 };
+                            paxos_entry_t* c_entry = paxos_log_get(p, p->local_commit_index);
+                            paxos_msg_t acc = {
+                                .type = MSG_ACCEPT, .ballot = p->active_ballot, .slot = s,
+                                .commit_index = p->local_commit_index,
+                                .value_hash = c_entry ? paxos_entry_hash(c_entry) : 0,
+                                .entries = safe_copy, .num_entries = 1
+                            };
                             acc.to = p->node_directory[j]; paxos_send_after_persist(p, acc);
                         } else { if (safe_copy) free(safe_copy); p->fatal_error = true; }
                     }
@@ -71,7 +77,13 @@ static void check_promise_quorum_and_activate(paxos_t* p) {
                     if (p->node_directory[j] != p->id && ((1ULL << j) & combined_mask)) {
                         paxos_entry_t* safe_copy = malloc(sizeof(paxos_entry_t));
                         if (safe_copy && paxos_entry_clone_retain(safe_copy, paxos_log_get(p, noop_slot))) {
-                            paxos_msg_t acc = { .type = MSG_ACCEPT, .ballot = p->active_ballot, .slot = noop_slot, .commit_index = p->local_commit_index, .entries = safe_copy, .num_entries = 1 };
+                            paxos_entry_t* c_entry = paxos_log_get(p, p->local_commit_index);
+                            paxos_msg_t acc = {
+                                .type = MSG_ACCEPT, .ballot = p->active_ballot, .slot = noop_slot,
+                                .commit_index = p->local_commit_index,
+                                .value_hash = c_entry ? paxos_entry_hash(c_entry) : 0,
+                                .entries = safe_copy, .num_entries = 1
+                            };
                             acc.to = p->node_directory[j]; paxos_send_after_persist(p, acc);
                         } else { if (safe_copy) free(safe_copy); p->fatal_error = true; }
                     }
@@ -166,12 +178,19 @@ static void handle_accepted(paxos_t* p, paxos_msg_t* msg) {
     size_t count = msg->num_entries > 0 ? msg->num_entries : 1;
     uint64_t highest_slot = msg->slot + count - 1;
 
+    // FAANG: Cryptographically Validate the ACK
+    if (msg->value_hash != 0) {
+        paxos_entry_t* expected = paxos_log_get(p, highest_slot);
+        if (!expected || paxos_entry_hash(expected) != msg->value_hash) {
+            return; // Drop! Split-brain or corrupted ACK!
+        }
+    }
+
     size_t peer_idx = 0;
     for (size_t i = 0; i < p->num_nodes; i++) {
         if (p->node_directory[i] == msg->from) { peer_idx = i; break; }
     }
 
-    // FAANG: Explicit Learner Promotion!
     if (highest_slot > p->learner_state[peer_idx].caught_up_through) {
         p->learner_state[peer_idx].caught_up_through = highest_slot;
     }
@@ -249,7 +268,13 @@ static void handle_accepted(paxos_t* p, paxos_msg_t* msg) {
                     if (p->node_directory[j] != p->id && ((1ULL << j) & combined_mask)) {
                         paxos_entry_t* safe_copy = malloc(sizeof(paxos_entry_t));
                         if (safe_copy && paxos_entry_clone_retain(safe_copy, paxos_log_get(p, noop_slot))) {
-                            paxos_msg_t acc = { .type = MSG_ACCEPT, .ballot = p->active_ballot, .slot = noop_slot, .commit_index = p->local_commit_index, .entries = safe_copy, .num_entries = 1 };
+                            paxos_entry_t* c_entry = paxos_log_get(p, p->local_commit_index);
+                            paxos_msg_t acc = {
+                                .type = MSG_ACCEPT, .ballot = p->active_ballot, .slot = noop_slot,
+                                .commit_index = p->local_commit_index,
+                                .value_hash = c_entry ? paxos_entry_hash(c_entry) : 0,
+                                .entries = safe_copy, .num_entries = 1
+                            };
                             acc.to = p->node_directory[j]; paxos_send_after_persist(p, acc);
                         } else { if (safe_copy) free(safe_copy); p->fatal_error = true; }
                     }
@@ -294,7 +319,6 @@ static void handle_install_snapshot_res(paxos_t* p, paxos_msg_t* msg) {
     if (msg->snapshot_done) {
         p->snapshot_offset[peer_idx] = p->snapshot_index + 1;
 
-        // FAANG: Snapshot installed, mark learner progress
         p->learner_state[peer_idx].snapshot_installed = true;
         p->learner_state[peer_idx].hard_state_initialized = true;
 
@@ -338,7 +362,6 @@ static void handle_read_barrier_res(paxos_t* p, paxos_msg_t* msg) {
 }
 
 void paxos_proposer_read_barrier_local(paxos_t* p, paxos_msg_t* msg) {
-    (void)msg; // FAANG: Silence unused parameter warning
     if (p->state != PAXOS_STATE_ACTIVE) return;
 
     size_t r_idx = p->current_read_seq % MAX_PENDING_READS;

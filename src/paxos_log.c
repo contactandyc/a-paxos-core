@@ -322,6 +322,9 @@ void paxos_compact(paxos_t* p, uint64_t up_to_slot) {
 }
 
 void paxos_advance_local_commit(paxos_t* p, uint64_t author_id, uint64_t author_ballot) {
+    (void)author_id; // FAANG: Unused in strict explicit-commit mode
+    (void)author_ballot;
+
     while (p->local_commit_index < p->leader_commit_hint) {
         uint64_t check_slot = p->local_commit_index + 1;
         if (check_slot < p->log_base_slot) break;
@@ -332,10 +335,8 @@ void paxos_advance_local_commit(paxos_t* p, uint64_t author_id, uint64_t author_
 
         paxos_log_slot_t* s = &p->log_chunks[c_idx]->slots[c_off];
 
-        if (s->has_accepted && s->accepted_entry.accepted_ballot == author_ballot && author_id == p->leader_id) {
-            paxos_log_learn_chosen(p, check_slot, &s->accepted_entry);
-        }
-
+        // FAANG: Strict Separation of Commit Hint vs Truth
+        // A slot must be explicitly marked is_chosen via Cryptographic Hash Match or FetchEntries!
         if (!s->is_chosen) break;
 
 #if PAXOS_ENABLE_RECONFIG

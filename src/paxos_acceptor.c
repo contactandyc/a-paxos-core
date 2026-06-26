@@ -27,7 +27,6 @@ static void check_and_fetch_gaps(paxos_t* p) {
     }
 }
 
-
 static void handle_prepare(paxos_t* p, paxos_msg_t* msg) {
     observe_higher_ballot(p, msg->ballot);
 
@@ -80,14 +79,24 @@ static void handle_accept(paxos_t* p, paxos_msg_t* msg) {
         p->promised_ballot = msg->ballot;
         p->leader_id = msg->from;
 
+        paxos_entry_t* highest_e = paxos_log_get_accepted(p, msg->slot + successful_accepts - 1);
+
         paxos_msg_t res = {
             .type = MSG_ACCEPTED,
             .to = msg->from,
             .ballot = msg->ballot,
             .slot = msg->slot,
-            .num_entries = successful_accepts
+            .num_entries = successful_accepts,
+            .value_hash = highest_e ? paxos_entry_hash(highest_e) : 0
         };
         paxos_send_after_persist(p, res);
+    }
+
+    if (msg->commit_index > 0 && msg->value_hash != 0) {
+        paxos_entry_t* local = paxos_log_get_accepted(p, msg->commit_index);
+        if (local && paxos_entry_hash(local) == msg->value_hash) {
+            paxos_log_learn_chosen(p, msg->commit_index, local);
+        }
     }
 
     if (msg->commit_index > p->leader_commit_hint) p->leader_commit_hint = msg->commit_index;
@@ -97,13 +106,20 @@ static void handle_accept(paxos_t* p, paxos_msg_t* msg) {
 
 static void handle_commit_notice(paxos_t* p, paxos_msg_t* msg) {
     if (msg->ballot < p->promised_ballot) return;
+
+    if (msg->commit_index > 0 && msg->value_hash != 0) {
+        paxos_entry_t* local = paxos_log_get_accepted(p, msg->commit_index);
+        if (local && paxos_entry_hash(local) == msg->value_hash) {
+            paxos_log_learn_chosen(p, msg->commit_index, local);
+        }
+    }
+
     if (msg->commit_index > p->leader_commit_hint) p->leader_commit_hint = msg->commit_index;
     paxos_advance_local_commit(p, msg->from, msg->ballot);
     check_and_fetch_gaps(p);
 }
 
 static void handle_fetch_entries_res(paxos_t* p, paxos_msg_t* msg) {
-    // FAANG: Restore Rogue Leader check!
     if (msg->reject || msg->ballot < p->promised_ballot || msg->from != p->leader_id) return;
 
     for (size_t i = 0; i < msg->num_entries; i++) {
@@ -118,6 +134,14 @@ static void handle_fetch_entries_res(paxos_t* p, paxos_msg_t* msg) {
         uint64_t c_idx = paxos_chunk_idx(p, s);
         uint64_t c_off = paxos_chunk_off(s);
         if (c_idx >= p->log_chunks_cap || !p->log_chunks[c_idx] || !p->log_chunks[c_idx]->slots[c_off].is_chosen) break;
+
+#if PAXOS_ENABLE_RECONFIG
+        // FAANG: Trigger config rebuild during catch-up!
+        if (p->log_chunks[c_idx]->slots[c_off].chosen_entry.type >= ENTRY_CONF_ADD &&
+            p->log_chunks[c_idx]->slots[c_off].chosen_entry.type <= ENTRY_CONF_FINAL) {
+            paxos_rebuild_config(p);
+        }
+#endif
 
         if (p->log_chunks[c_idx]->slots[c_off].chosen_entry.type == ENTRY_CONF_FINAL ||
             p->log_chunks[c_idx]->slots[c_off].chosen_entry.type == ENTRY_CONF_REMOVE) {

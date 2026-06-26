@@ -82,7 +82,6 @@ typedef struct {
     bool active;
 } paxos_pending_read_t;
 
-// FAANG: Explicit Learner State Tracking
 typedef struct {
     bool snapshot_installed;
     uint64_t caught_up_through;
@@ -129,7 +128,6 @@ struct paxos_s {
     uint64_t next_slot;
     uint64_t leader_id;
 
-    // FAANG: Replaced primitive tracking with strict state
     paxos_learner_state_t learner_state[MAX_PEERS];
 
     uint64_t promise_mask;
@@ -234,6 +232,27 @@ static inline bool paxos_entry_value_equal(const paxos_entry_t* a, const paxos_e
     if (a->data_len != b->data_len) return false;
     if (a->data_len == 0) return true;
     return memcmp(a->data, b->data, a->data_len) == 0;
+}
+
+// FAANG: Cryptographic FNV-1a Hashing for Split-Brain immunity
+static inline uint64_t paxos_entry_hash(const paxos_entry_t* e) {
+    if (!e) return 0;
+    uint64_t hash = 14695981039346656037ULL;
+
+    uint64_t meta[4] = { e->slot, e->accepted_ballot, (uint64_t)e->type, e->client_id };
+    uint8_t* p_bytes = (uint8_t*)meta;
+    for (size_t i = 0; i < sizeof(meta); i++) {
+        hash ^= p_bytes[i];
+        hash *= 1099511628211ULL;
+    }
+
+    if (e->data && e->data_len > 0) {
+        for (size_t i = 0; i < e->data_len; i++) {
+            hash ^= e->data[i];
+            hash *= 1099511628211ULL;
+        }
+    }
+    return hash;
 }
 
 static inline void observe_higher_ballot(paxos_t* p, uint64_t b) {

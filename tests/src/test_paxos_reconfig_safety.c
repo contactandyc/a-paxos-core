@@ -1,7 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
-//
-// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #define PAXOS_TESTING 1
 #include <stdio.h>
@@ -22,21 +20,21 @@ MACRO_TEST(accepted_but_unchosen_config_must_not_change_quorum) {
     paxos_destroy(p);
 }
 
-// FIXED: Now that reconfig is enabled, we assert that the config successfully applies!
 MACRO_TEST(config_entries_apply_when_reconfig_is_enabled) {
     uint64_t peers[] = {1, 2, 3};
     paxos_t* p = paxos_create(1, peers, 3);
 
     uint64_t new_node = 4;
-    paxos_log_accept(p, 1, 10, ENTRY_CONF_ADD, 0, 0, (uint8_t*)&new_node, sizeof(uint64_t));
+
+    // FAANG: In strict mode, config updates MUST arrive as verified chosen data!
+    paxos_entry_t e = { .slot = 1, .accepted_ballot = 10, .type = ENTRY_CONF_ADD, .data = (uint8_t*)&new_node, .data_len = sizeof(uint64_t) };
+    paxos_msg_t fetch_res = { .type = MSG_FETCH_ENTRIES_RES, .to = 1, .from = 2, .ballot = 10, .commit_index = 1, .entries = &e, .num_entries = 1 };
 
     p->leader_id = 2;
     p->promised_ballot = 10;
-    p->leader_commit_hint = 1;
 
-    paxos_advance_local_commit(p, 2, 10);
+    paxos_step_remote(p, &fetch_res);
 
-    // The mask MUST successfully update to 15 (Nodes 1, 2, 3, and 4)
     MACRO_ASSERT_EQ_INT(p->active_config_mask, 15);
 
     paxos_destroy(p);
