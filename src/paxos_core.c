@@ -24,9 +24,16 @@ paxos_t* paxos_create(uint64_t id, uint64_t* peers, size_t num_peers) {
     p->pending_reconfig = false;
     p->needs_conf_final = false;
 
-    // FAANG: Explicitly register initial peers!
     for (size_t i = 0; i < num_peers; i++) p->active_config_mask |= paxos_peer_register(p, peers[i]);
     p->base_config_mask = p->active_config_mask;
+
+    // FAANG: Initialize the Explicit Learner Tracker for bootstrap nodes
+    for (size_t i = 0; i < p->num_nodes; i++) {
+        p->learner_state[i].eligible_to_vote = true;
+        p->learner_state[i].snapshot_installed = true;
+        p->learner_state[i].hard_state_initialized = true;
+        p->learner_state[i].caught_up_through = 0;
+    }
 
     p->log_chunks_cap = 16;
     p->log_chunks = calloc(p->log_chunks_cap, sizeof(paxos_log_chunk_t*));
@@ -67,8 +74,6 @@ paxos_t* paxos_restore(uint64_t id, uint64_t* peers, size_t num_peers,
         p->active_config_mask = hard_state.active_config_mask;
         p->joint_config_mask = hard_state.joint_config_mask;
         p->pending_reconfig = hard_state.pending_reconfig;
-
-        // FAANG: Safely restore mid-transition config state
         p->in_joint_consensus = p->pending_reconfig && (p->joint_config_mask != 0);
         p->base_config_mask = p->active_config_mask;
     }
@@ -103,6 +108,18 @@ paxos_t* paxos_restore(uint64_t id, uint64_t* peers, size_t num_peers,
 
     paxos_rebuild_config(p);
     p->num_unstable_slots = 0;
+
+    // FAANG: Catch-up the Explicit Learner Tracker upon restart
+    uint64_t combined_mask = p->active_config_mask | p->joint_config_mask;
+    for (size_t i = 0; i < p->num_nodes; i++) {
+        if ((1ULL << i) & combined_mask) {
+            p->learner_state[i].eligible_to_vote = true;
+            p->learner_state[i].snapshot_installed = true;
+            p->learner_state[i].hard_state_initialized = true;
+            p->learner_state[i].caught_up_through = p->local_commit_index;
+        }
+    }
+
     return p;
 }
 
@@ -298,8 +315,9 @@ void paxos_step_local(paxos_t* p, paxos_msg_t* msg) {
                 }
 
                 if (proposal.type == ENTRY_CONF_ADD) {
-                    if (p->peer_match_index[t_idx] == 0 ||
-                       (p->local_commit_index > 100 && p->peer_match_index[t_idx] < p->local_commit_index - 100)) {
+                    // FAANG: Strict Learner Firewall - Explicit Promotion Check
+                    if (!p->learner_state[t_idx].eligible_to_vote ||
+                        p->learner_state[t_idx].caught_up_through < p->local_commit_index) {
                         continue;
                     }
                 }

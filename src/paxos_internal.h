@@ -82,6 +82,14 @@ typedef struct {
     bool active;
 } paxos_pending_read_t;
 
+// FAANG: Explicit Learner State Tracking
+typedef struct {
+    bool snapshot_installed;
+    uint64_t caught_up_through;
+    bool hard_state_initialized;
+    bool eligible_to_vote;
+} paxos_learner_state_t;
+
 struct paxos_s {
     uint64_t id;
     paxos_state_t state;
@@ -121,7 +129,9 @@ struct paxos_s {
     uint64_t next_slot;
     uint64_t leader_id;
 
-    uint64_t peer_match_index[MAX_PEERS];
+    // FAANG: Replaced primitive tracking with strict state
+    paxos_learner_state_t learner_state[MAX_PEERS];
+
     uint64_t promise_mask;
     bool self_promised;
 
@@ -184,7 +194,6 @@ static inline uint64_t paxos_chunk_off(uint64_t slot) {
     return slot % PAXOS_LOG_CHUNK_SIZE;
 }
 
-// FAANG: Safe Lookup - Never mutates state
 static inline uint64_t paxos_peer_bit(paxos_t* p, uint64_t node_id) {
     if (node_id == 0) return 0;
     for (size_t i = 0; i < p->num_nodes; i++) {
@@ -193,7 +202,6 @@ static inline uint64_t paxos_peer_bit(paxos_t* p, uint64_t node_id) {
     return 0;
 }
 
-// FAANG: Explicit Registration API
 static inline uint64_t paxos_peer_register(paxos_t* p, uint64_t node_id) {
     if (node_id == 0) return 0;
     for (size_t i = 0; i < p->num_nodes; i++) {

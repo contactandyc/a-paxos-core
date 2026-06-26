@@ -124,8 +124,6 @@ static void handle_promise(paxos_t* p, paxos_msg_t* msg) {
         for (size_t i = 0; i < msg->num_entries; i++) {
             paxos_entry_t* e = &msg->entries[i];
             if (e->slot > p->recovery_max_slot) {
-
-                // FAANG: Restore the DOS Firewall
                 if (e->slot - recovery_start >= MAX_RECOVERY_GAP) {
                     p->fatal_error = true;
                     return;
@@ -173,8 +171,13 @@ static void handle_accepted(paxos_t* p, paxos_msg_t* msg) {
         if (p->node_directory[i] == msg->from) { peer_idx = i; break; }
     }
 
-    if (highest_slot > p->peer_match_index[peer_idx]) {
-        p->peer_match_index[peer_idx] = highest_slot;
+    // FAANG: Explicit Learner Promotion!
+    if (highest_slot > p->learner_state[peer_idx].caught_up_through) {
+        p->learner_state[peer_idx].caught_up_through = highest_slot;
+    }
+    if (p->learner_state[peer_idx].caught_up_through >= p->local_commit_index) {
+        p->learner_state[peer_idx].eligible_to_vote = true;
+        p->learner_state[peer_idx].hard_state_initialized = true;
     }
 
     uint64_t peer_mask = paxos_peer_bit(p, msg->from);
@@ -290,6 +293,17 @@ static void handle_install_snapshot_res(paxos_t* p, paxos_msg_t* msg) {
 
     if (msg->snapshot_done) {
         p->snapshot_offset[peer_idx] = p->snapshot_index + 1;
+
+        // FAANG: Snapshot installed, mark learner progress
+        p->learner_state[peer_idx].snapshot_installed = true;
+        p->learner_state[peer_idx].hard_state_initialized = true;
+
+        if (p->snapshot_index > p->learner_state[peer_idx].caught_up_through) {
+            p->learner_state[peer_idx].caught_up_through = p->snapshot_index;
+        }
+        if (p->learner_state[peer_idx].caught_up_through >= p->local_commit_index) {
+            p->learner_state[peer_idx].eligible_to_vote = true;
+        }
     } else {
         p->snapshot_offset[peer_idx] = msg->slot;
         paxos_set_snapshot_chunk(p, msg->from, NULL, 0, msg->slot, false);
@@ -324,16 +338,14 @@ static void handle_read_barrier_res(paxos_t* p, paxos_msg_t* msg) {
 }
 
 void paxos_proposer_read_barrier_local(paxos_t* p, paxos_msg_t* msg) {
+    (void)msg; // FAANG: Silence unused parameter warning
     if (p->state != PAXOS_STATE_ACTIVE) return;
 
-    p->current_read_seq++;
     size_t r_idx = p->current_read_seq % MAX_PENDING_READS;
+    p->current_read_seq++;
 
     paxos_pending_read_t* r = &p->pending_reads[r_idx];
-
-    // FAANG: Safely route the host application's sequence ID context
     r->read_seq = msg->read_seq;
-
     r->slot = p->local_commit_index;
     r->ack_mask = paxos_peer_bit(p, p->id);
     r->active = true;
