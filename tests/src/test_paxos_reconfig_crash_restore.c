@@ -80,6 +80,19 @@ MACRO_TEST(restore_during_joint_consensus_preserves_joint_state) {
     MACRO_ASSERT_EQ_INT(p2->joint_config_mask, 15);
     MACRO_ASSERT_TRUE(p2->pending_reconfig == true);
 
+    // FAANG: The critical Reviewer Test - old mask must remain base!
+    MACRO_ASSERT_EQ_INT(p2->base_config_mask, 7);
+    MACRO_ASSERT_EQ_INT(p2->active_config_mask, 7);
+
+    // Assert that the engine actually enforces the overlapping majority
+    uint64_t old_majority = (1ULL << 0) | (1ULL << 1); // Nodes 1 and 2
+    uint64_t new_majority = (1ULL << 0) | (1ULL << 1) | (1ULL << 2); // Nodes 1, 2, 3
+
+    // Old majority alone should FAIL
+    MACRO_ASSERT_TRUE(paxos_has_quorum(p2, old_majority) == false);
+    // Both majorities should PASS
+    MACRO_ASSERT_TRUE(paxos_has_quorum(p2, old_majority | new_majority) == true);
+
     paxos_ready_destroy(&ready);
     paxos_destroy(p2);
 }

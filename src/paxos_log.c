@@ -41,14 +41,14 @@ void paxos_rebuild_config(paxos_t* p) {
 
             if (e->type == ENTRY_CONF_ADD && e->data_len == sizeof(uint64_t)) {
                 uint64_t target_node; memcpy(&target_node, e->data, sizeof(uint64_t));
-                p->active_config_mask |= paxos_peer_bit(p, target_node);
+                p->active_config_mask |= paxos_peer_register(p, target_node);
             } else if (e->type == ENTRY_CONF_REMOVE && e->data_len == sizeof(uint64_t)) {
                 uint64_t target_node; memcpy(&target_node, e->data, sizeof(uint64_t));
                 p->active_config_mask &= ~paxos_peer_bit(p, target_node);
             } else if (e->type == ENTRY_CONF_JOINT) {
                 uint64_t new_mask = 0; uint64_t* new_nodes = (uint64_t*)e->data;
                 size_t count = e->data_len / sizeof(uint64_t);
-                for(size_t i = 0; i < count; i++) new_mask |= paxos_peer_bit(p, new_nodes[i]);
+                for(size_t i = 0; i < count; i++) new_mask |= paxos_peer_register(p, new_nodes[i]);
                 p->joint_config_mask = new_mask;
                 p->in_joint_consensus = true;
                 p->pending_reconfig = true;
@@ -63,7 +63,6 @@ void paxos_rebuild_config(paxos_t* p) {
 }
 
 bool paxos_log_accept(paxos_t* p, uint64_t slot, uint64_t ballot, entry_type_t type, uint64_t cid, uint64_t cseq, const uint8_t* data, size_t data_len) {
-    // FAANG: Restore memory bounds limits!
     if (p->fatal_error || slot <= p->snapshot_index || slot < p->log_base_slot) return false;
     if (data_len > PAXOS_MAX_PAYLOAD_SIZE) return false;
     if (data_len > 0 && !data) return false;
@@ -84,17 +83,25 @@ bool paxos_log_accept(paxos_t* p, uint64_t slot, uint64_t ballot, entry_type_t t
 
     paxos_log_slot_t* s = &p->log_chunks[c_idx]->slots[c_off];
 
-    // FAANG: Split-Brain Firewall
     if (s->is_chosen) {
         paxos_entry_t temp = { .type = type, .client_id = cid, .client_seq = cseq, .data = (uint8_t*)data, .data_len = data_len };
         if (!paxos_entry_value_equal(&s->chosen_entry, &temp)) {
             p->fatal_error = true;
             return false;
         }
-        // Do NOT return here! Proceed to safely update the accepted_entry vote!
     }
 
-    if (s->has_accepted) paxos_entry_destroy(&s->accepted_entry);
+    uint8_t* new_payload = NULL;
+    if (data_len > 0) {
+        new_payload = paxos_payload_alloc(data, data_len);
+        if (!new_payload) {
+            p->fatal_error = true;
+            return false;
+        }
+    }
+
+    paxos_entry_t old_entry = s->accepted_entry;
+    bool had_old = s->has_accepted;
 
     s->accepted_entry.slot = slot;
     s->accepted_entry.accepted_ballot = ballot;
@@ -102,7 +109,7 @@ bool paxos_log_accept(paxos_t* p, uint64_t slot, uint64_t ballot, entry_type_t t
     s->accepted_entry.client_id = cid;
     s->accepted_entry.client_seq = cseq;
     s->accepted_entry.data_len = data_len;
-    s->accepted_entry.data = paxos_payload_alloc(data, data_len);
+    s->accepted_entry.data = new_payload;
 
     s->has_accepted = true;
 
@@ -118,7 +125,9 @@ bool paxos_log_accept(paxos_t* p, uint64_t slot, uint64_t ballot, entry_type_t t
     }
     s->unstable = true;
 
+    if (had_old) paxos_entry_destroy(&old_entry);
     if (slot > p->highest_slot) p->highest_slot = slot;
+
     return true;
 }
 
@@ -145,7 +154,13 @@ bool paxos_log_learn_chosen(paxos_t* p, uint64_t slot, const paxos_entry_t* entr
         return true;
     }
 
-    paxos_entry_clone_deep(&s->chosen_entry, entry);
+    paxos_entry_t temp_clone;
+    if (!paxos_entry_clone_deep(&temp_clone, entry)) {
+        p->fatal_error = true;
+        return false;
+    }
+
+    s->chosen_entry = temp_clone;
     s->is_chosen = true;
 
     if (!s->unstable) {
@@ -253,7 +268,7 @@ void paxos_compact(paxos_t* p, uint64_t up_to_slot) {
             paxos_entry_t* e = &s_data->chosen_entry;
             if (e->type == ENTRY_CONF_ADD && e->data_len == sizeof(uint64_t)) {
                 uint64_t target; memcpy(&target, e->data, sizeof(uint64_t));
-                p->base_config_mask |= paxos_peer_bit(p, target);
+                p->base_config_mask |= paxos_peer_register(p, target);
             } else if (e->type == ENTRY_CONF_REMOVE && e->data_len == sizeof(uint64_t)) {
                 uint64_t target; memcpy(&target, e->data, sizeof(uint64_t));
                 p->base_config_mask &= ~paxos_peer_bit(p, target);
