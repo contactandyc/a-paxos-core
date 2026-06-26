@@ -1,7 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
-//
-// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #define PAXOS_TESTING 1
 #include <stdio.h>
@@ -32,9 +30,8 @@ MACRO_TEST(paxos_restores_from_hard_state_and_entries) {
     uint64_t c_idx = 1 / PAXOS_LOG_CHUNK_SIZE;
     uint64_t c_off = 1 % PAXOS_LOG_CHUNK_SIZE;
 
-    // FIXED: Restored entries are already on disk, so they are explicitly NOT unstable!
     MACRO_ASSERT_TRUE(p->log_chunks[c_idx]->slots[c_off].unstable == false);
-    MACRO_ASSERT_TRUE(p->log_chunks[c_idx]->slots[c_off].chosen == false);
+    MACRO_ASSERT_TRUE(p->log_chunks[c_idx]->slots[c_off].is_chosen == false);
 
     paxos_destroy(p);
 }

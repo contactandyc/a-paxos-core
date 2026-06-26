@@ -1,7 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
-//
-// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #define PAXOS_TESTING 1
 #include <stdio.h>
@@ -60,7 +58,7 @@ MACRO_TEST(paxos_read_multi_node_waits_for_quorum) {
         .to = 1,
         .from = 2,
         .ballot = p->active_ballot,
-        .read_seq = 1
+        .read_seq = 500
     };
     paxos_step_remote(p, &res);
 

@@ -1,11 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
-//
-// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #include "paxos_internal.h"
 
-// FAANG: Explicit Learner Registration API
 void paxos_register_learner(paxos_t* p, uint64_t node_id) {
     if (!p || p->num_nodes >= MAX_PEERS) return;
     for (size_t i = 0; i < p->num_nodes; i++) {
@@ -68,7 +65,6 @@ paxos_t* paxos_restore(uint64_t id, uint64_t* peers, size_t num_peers,
     p->max_generated_ballot = hard_state.max_generated_ballot;
     p->prev_hard_state = hard_state;
 
-    // FAANG: Restore Durable Configuration from Hard State!
     if (hard_state.active_config_mask != 0) {
         p->active_config_mask = hard_state.active_config_mask;
         p->joint_config_mask = hard_state.joint_config_mask;
@@ -92,20 +88,21 @@ paxos_t* paxos_restore(uint64_t id, uint64_t* peers, size_t num_peers,
         if (e->type >= ENTRY_CONF_ADD && e->type <= ENTRY_CONF_FINAL) continue;
 #endif
 
-        if (!paxos_log_accept(p, e->slot, e->accepted_ballot, e->type, e->client_id, e->client_seq, e->data, e->data_len)) {
-            paxos_destroy(p); return NULL;
+        if (entries[i].chosen) {
+            paxos_log_learn_chosen(p, e->slot, e);
+            uint64_t c_idx = paxos_chunk_idx(p, e->slot);
+            uint64_t c_off = paxos_chunk_off(e->slot);
+            p->log_chunks[c_idx]->slots[c_off].unstable = false;
+        } else {
+            paxos_log_accept(p, e->slot, e->accepted_ballot, e->type, e->client_id, e->client_seq, e->data, e->data_len);
+            uint64_t c_idx = paxos_chunk_idx(p, e->slot);
+            uint64_t c_off = paxos_chunk_off(e->slot);
+            p->log_chunks[c_idx]->slots[c_off].unstable = false;
         }
-        uint64_t c_idx = paxos_chunk_idx(p, e->slot);
-        uint64_t c_off = paxos_chunk_off(e->slot);
-        p->log_chunks[c_idx]->slots[c_off].unstable = false;
-        p->log_chunks[c_idx]->slots[c_off].chosen = entries[i].chosen;
     }
 
     paxos_rebuild_config(p);
-
-    // Clear unstable vector since restored slots are already persisted on disk
     p->num_unstable_slots = 0;
-
     return p;
 }
 
@@ -115,7 +112,9 @@ void paxos_destroy(paxos_t* p) {
         for (size_t i = 0; i < p->log_chunks_cap; i++) {
             if (p->log_chunks[i]) {
                 for (size_t j = 0; j < PAXOS_LOG_CHUNK_SIZE; j++) {
-                    if (p->log_chunks[i]->slots[j].has_value) paxos_entry_destroy(&p->log_chunks[i]->slots[j].entry);
+                    // FAANG: Safely free both ledgers!
+                    if (p->log_chunks[i]->slots[j].has_accepted) paxos_entry_destroy(&p->log_chunks[i]->slots[j].accepted_entry);
+                    if (p->log_chunks[i]->slots[j].is_chosen) paxos_entry_destroy(&p->log_chunks[i]->slots[j].chosen_entry);
                 }
                 free(p->log_chunks[i]);
             }
@@ -183,10 +182,8 @@ static bool validate_entry(paxos_entry_t* e) {
     if (e->data_len > PAXOS_MAX_PAYLOAD_SIZE) return false;
     if (e->data_len > 0 && !e->data) return false;
 
-    // Validate ADD/REMOVE
     if ((e->type == ENTRY_CONF_ADD || e->type == ENTRY_CONF_REMOVE) && e->data_len != sizeof(uint64_t)) return false;
 
-    // FAANG: Strict JOINT validation
     if (e->type == ENTRY_CONF_JOINT) {
         if (e->data_len == 0 || e->data_len % sizeof(uint64_t) != 0) return false;
 
@@ -195,14 +192,13 @@ static bool validate_entry(paxos_entry_t* e) {
 
         uint64_t* nodes = (uint64_t*)e->data;
         for (size_t i = 0; i < count; i++) {
-            if (nodes[i] == 0) return false; // Null node ID
+            if (nodes[i] == 0) return false;
             for (size_t j = i + 1; j < count; j++) {
-                if (nodes[i] == nodes[j]) return false; // Duplicate node ID!
+                if (nodes[i] == nodes[j]) return false;
             }
         }
     }
 
-    // FAANG: Strict FINAL validation
     if (e->type == ENTRY_CONF_FINAL && e->data_len != 0) return false;
 
     return true;
@@ -229,7 +225,6 @@ static bool paxos_msg_is_valid(paxos_msg_t* msg) {
 static bool paxos_is_valid_peer(paxos_t* p, uint64_t from_id) {
     for (size_t i = 0; i < p->num_nodes; i++) {
         if (p->node_directory[i] == from_id) {
-            // FAANG: Allow silent learners to communicate and catch up!
             return true;
         }
     }
@@ -262,7 +257,6 @@ void paxos_tick(paxos_t* p) {
     }
 }
 
-// FAANG: Joint Consensus Auto-Proposal Interceptor
 static void process_auto_proposals(paxos_t* p) {
     if (p->needs_conf_final && p->state == PAXOS_STATE_ACTIVE && p->id == p->leader_id) {
         p->needs_conf_final = false;
@@ -291,12 +285,11 @@ void paxos_step_local(paxos_t* p, paxos_msg_t* msg) {
             uint64_t joint_nodes[MAX_PEERS];
 
             if (proposal.type == ENTRY_CONF_ADD || proposal.type == ENTRY_CONF_REMOVE) {
-                if (p->pending_reconfig) continue; // Drop to enforce Alpha-Window
+                if (p->pending_reconfig) continue;
 
                 uint64_t target_node; memcpy(&target_node, proposal.data, sizeof(uint64_t));
                 size_t t_idx = 0; bool found = false;
 
-                // Implicitly add them as a silent Learner so they start getting heartbeats
                 for (size_t n = 0; n < p->num_nodes; n++) {
                     if (p->node_directory[n] == target_node) { t_idx = n; found = true; break; }
                 }
@@ -305,11 +298,10 @@ void paxos_step_local(paxos_t* p, paxos_msg_t* msg) {
                     t_idx = p->num_nodes++;
                 }
 
-                // FAANG: The Learner Liveness Firewall
                 if (proposal.type == ENTRY_CONF_ADD) {
                     if (p->peer_match_index[t_idx] == 0 ||
                        (p->local_commit_index > 100 && p->peer_match_index[t_idx] < p->local_commit_index - 100)) {
-                        continue; // Drop the proposal! They aren't ready to vote.
+                        continue;
                     }
                 }
 
@@ -349,12 +341,12 @@ void paxos_step_local(paxos_t* p, paxos_msg_t* msg) {
 
             batch_count++;
 
-            // Single Node Instant Commit Fast-Path
             if (paxos_has_quorum(p, inf->ack_mask)) {
                 inf->chosen = true;
-                uint64_t c_idx = paxos_chunk_idx(p, slot);
-                uint64_t c_off = paxos_chunk_off(slot);
-                p->log_chunks[c_idx]->slots[c_off].chosen = true;
+
+                // FAANG: Update Dual-Ledger Fast-Path
+                paxos_log_learn_chosen(p, slot, paxos_log_get_accepted(p, slot));
+
                 p->local_commit_index = slot;
                 p->leader_commit_hint = slot;
                 inf->active = false;
@@ -365,7 +357,6 @@ void paxos_step_local(paxos_t* p, paxos_msg_t* msg) {
             }
         }
 
-        // FAANG: Batched Broadcasts
         if (batch_count > 0 && p->num_nodes > 1) {
             uint64_t combined_mask = p->active_config_mask | p->joint_config_mask;
             for (size_t i = 0; i < p->num_nodes; i++) {
@@ -417,7 +408,6 @@ paxos_ready_t paxos_get_ready(paxos_t* p) {
     ready.hard_state.promised_ballot = p->promised_ballot;
     ready.hard_state.max_generated_ballot = p->max_generated_ballot;
 
-    // FAANG: Export Durable Configuration
     ready.hard_state.active_config_mask = p->active_config_mask;
     ready.hard_state.joint_config_mask = p->joint_config_mask;
     ready.hard_state.pending_reconfig = p->pending_reconfig;
@@ -446,9 +436,11 @@ paxos_ready_t paxos_get_ready(paxos_t* p) {
 
                 if (c_idx >= p->log_chunks_cap || !p->log_chunks[c_idx]) break;
                 paxos_log_slot_t* slot_data = &p->log_chunks[c_idx]->slots[c_off];
-                if (!slot_data->has_value || !slot_data->chosen) break;
 
-                if (paxos_entry_clone_retain(&ready.chosen_entries[valid], &slot_data->entry)) {
+                // FAANG: Extract exclusively from the chosen_entry Public Record!
+                if (!slot_data->is_chosen) break;
+
+                if (paxos_entry_clone_retain(&ready.chosen_entries[valid], &slot_data->chosen_entry)) {
                     valid++;
                 } else {
                     p->fatal_error = true; break;
@@ -489,13 +481,12 @@ void paxos_advance(paxos_t* p, const uint64_t* stable_slots, size_t num_stable_s
         if (s < p->log_base_slot) continue;
         uint64_t c_idx = paxos_chunk_idx(p, s);
         uint64_t c_off = paxos_chunk_off(s);
-        if (c_idx < p->log_chunks_cap && p->log_chunks[c_idx] && p->log_chunks[c_idx]->slots[c_off].has_value) {
+        if (c_idx < p->log_chunks_cap && p->log_chunks[c_idx]) {
             p->log_chunks[c_idx]->slots[c_off].unstable = false;
             if (s > p->stable_accepted_through) p->stable_accepted_through = s;
         }
     }
 
-    // FAANG: Lazy Unstable Vector Compaction.
     size_t kept = 0;
     for (size_t i = 0; i < p->num_unstable_slots; i++) {
         uint64_t s = p->unstable_slots[i];
@@ -558,10 +549,11 @@ void paxos_snapshot_acked(paxos_t* p, bool success) {
         for (size_t c = 0; c < p->log_chunks_cap; c++) {
             if (!p->log_chunks[c]) continue;
             for (size_t o = 0; o < PAXOS_LOG_CHUNK_SIZE; o++) {
-                if (p->log_chunks[c]->slots[o].has_value) {
-                    paxos_entry_destroy(&p->log_chunks[c]->slots[o].entry);
-                    p->log_chunks[c]->slots[o].has_value = false;
-                }
+                // FAANG: Safely free both ledgers during snapshot cleanup!
+                if (p->log_chunks[c]->slots[o].has_accepted) paxos_entry_destroy(&p->log_chunks[c]->slots[o].accepted_entry);
+                if (p->log_chunks[c]->slots[o].is_chosen) paxos_entry_destroy(&p->log_chunks[c]->slots[o].chosen_entry);
+                p->log_chunks[c]->slots[o].has_accepted = false;
+                p->log_chunks[c]->slots[o].is_chosen = false;
             }
             free(p->log_chunks[c]);
             p->log_chunks[c] = NULL;

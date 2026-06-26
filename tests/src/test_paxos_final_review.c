@@ -1,7 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
-//
-// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #define PAXOS_TESTING 1
 #include <stdio.h>
@@ -57,9 +55,7 @@ MACRO_TEST(fetch_entries_conflicting_with_chosen_slot_fatals) {
 
     // Locally commit "DATA_A"
     paxos_log_accept(p, 1, 5, ENTRY_NORMAL, 0, 0, (uint8_t*)"DATA_A", 6);
-    uint64_t c_idx = paxos_chunk_idx(p, 1);
-    uint64_t c_off = paxos_chunk_off(1);
-    p->log_chunks[c_idx]->slots[c_off].chosen = true;
+    paxos_log_learn_chosen(p, 1, paxos_log_get_accepted(p, 1));
 
     // A rogue leader tries to catch us up with conflicting "DATA_B"
     p->leader_id = 2;

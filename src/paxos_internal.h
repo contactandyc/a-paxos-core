@@ -1,7 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
-//
-// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #ifndef PAXOS_INTERNAL_H
 #define PAXOS_INTERNAL_H
@@ -16,9 +14,8 @@
 #define MAX_PENDING_READS 128
 #define INFLIGHT_WINDOW 4096
 #define MAX_RECOVERY_GAP 100000
-
-// FAANG: The locks are off. Dynamic Topology is live.
 #define PAXOS_ENABLE_RECONFIG 1
+#define PAXOS_LOG_CHUNK_SIZE 1024
 
 typedef struct {
     _Atomic uint32_t ref_count;
@@ -50,13 +47,13 @@ static inline void paxos_payload_release(uint8_t* data) {
     }
 }
 
-#define PAXOS_LOG_CHUNK_SIZE 1024
-
+// FAANG: Dual-Ledger Slot Design
 typedef struct {
-    bool has_value;
+    bool has_accepted;
+    bool is_chosen;
     bool unstable;
-    bool chosen;
-    paxos_entry_t entry;
+    paxos_entry_t accepted_entry;
+    paxos_entry_t chosen_entry;
 } paxos_log_slot_t;
 
 typedef struct {
@@ -96,8 +93,6 @@ struct paxos_s {
     uint64_t joint_config_mask;
     bool in_joint_consensus;
     bool pending_reconfig;
-
-    // FAANG: Trigger flag for Phase 2 of Joint Consensus
     bool needs_conf_final;
 
     uint64_t promised_ballot;
@@ -126,6 +121,7 @@ struct paxos_s {
     uint64_t next_slot;
     uint64_t leader_id;
 
+    // FAANG: The Learner Catch-up Tracker
     uint64_t peer_match_index[MAX_PEERS];
 
     uint64_t promise_mask;
@@ -174,7 +170,6 @@ struct paxos_s {
 
 void paxos_send_immediate(paxos_t* p, paxos_msg_t msg);
 void paxos_send_after_persist(paxos_t* p, paxos_msg_t msg);
-
 bool paxos_entry_clone_deep(paxos_entry_t* dst, const paxos_entry_t* src);
 bool paxos_entry_clone_retain(paxos_entry_t* dst, const paxos_entry_t* src);
 void paxos_entry_destroy(paxos_entry_t* e);
@@ -207,7 +202,6 @@ static inline bool paxos_has_quorum(paxos_t* p, uint64_t ack_mask) {
     int active_req = (__builtin_popcountll(p->active_config_mask) / 2) + 1;
     if (active_acks < active_req) return false;
 
-    // FAANG: The core of Joint Consensus. Requires a secondary overlapping majority!
     if (p->in_joint_consensus) {
         int joint_acks = __builtin_popcountll(ack_mask & p->joint_config_mask);
         int joint_req = (__builtin_popcountll(p->joint_config_mask) / 2) + 1;
@@ -235,11 +229,17 @@ static inline void observe_higher_ballot(paxos_t* p, uint64_t b) {
 }
 
 void paxos_rebuild_config(paxos_t* p);
+
+// FAANG: The updated Log API
 bool paxos_log_accept(paxos_t* p, uint64_t slot, uint64_t ballot, entry_type_t type, uint64_t cid, uint64_t cseq, const uint8_t* data, size_t data_len);
+bool paxos_log_learn_chosen(paxos_t* p, uint64_t slot, const paxos_entry_t* entry);
 paxos_entry_t* paxos_log_get(paxos_t* p, uint64_t slot);
+paxos_entry_t* paxos_log_get_accepted(paxos_t* p, uint64_t slot);
 paxos_entry_t* paxos_log_extract_unstable(paxos_t* p, size_t* out_count);
+
 paxos_entry_t* paxos_log_extract_range(paxos_t* p, uint64_t start_slot, uint64_t end_slot, size_t* out_count);
 paxos_entry_t* paxos_log_extract_suffix(paxos_t* p, uint64_t start_slot, size_t* out_count);
+
 void paxos_advance_local_commit(paxos_t* p, uint64_t author_id, uint64_t author_ballot);
 void paxos_acceptor_step(paxos_t* p, paxos_msg_t* msg);
 void paxos_proposer_step(paxos_t* p, paxos_msg_t* msg);

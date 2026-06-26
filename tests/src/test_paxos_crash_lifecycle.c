@@ -1,7 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
-//
-// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #define PAXOS_TESTING 1
 #include <stdio.h>
@@ -69,7 +67,7 @@ MACRO_TEST(crash_after_entries_persisted_but_before_advance) {
 
     uint64_t c_idx = (1 - p2->log_base_slot) / PAXOS_LOG_CHUNK_SIZE;
     uint64_t c_off = (1 - p2->log_base_slot) % PAXOS_LOG_CHUNK_SIZE;
-    MACRO_ASSERT_TRUE(p2->log_chunks[c_idx]->slots[c_off].chosen == false);
+    MACRO_ASSERT_TRUE(p2->log_chunks[c_idx]->slots[c_off].is_chosen == false);
 
     paxos_destroy(p2);
 }
