@@ -30,6 +30,7 @@ void paxos_rebuild_config(paxos_t* p) {
     p->active_config_mask = p->base_config_mask;
     p->joint_config_mask = 0;
     p->in_joint_consensus = false;
+    p->pending_reconfig = false; // FAANG: Reset the lock at start of rebuild
 
     for (size_t c = 0; c < p->log_chunks_cap; c++) {
         if (!p->log_chunks[c]) continue;
@@ -52,10 +53,16 @@ void paxos_rebuild_config(paxos_t* p) {
                 for(size_t i = 0; i < count; i++) new_mask |= paxos_peer_bit(p, new_nodes[i]);
                 p->joint_config_mask = new_mask;
                 p->in_joint_consensus = true;
+
+                // FAANG: Safely re-engage the Alpha-Window lock during restore!
+                p->pending_reconfig = true;
+
             } else if (e->type == ENTRY_CONF_FINAL) {
                  p->active_config_mask = p->joint_config_mask;
                  p->in_joint_consensus = false;
-                 p->pending_reconfig = false; // Release the lock
+
+                 // FAANG: Safely release the lock when the transition completes
+                 p->pending_reconfig = false;
             }
         }
     }

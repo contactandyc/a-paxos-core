@@ -152,30 +152,35 @@ static void handle_accept(paxos_t* p, paxos_msg_t* msg) {
         reply_nack(p, msg); return;
     }
 
-    if (msg->num_entries != 1) return;
-    paxos_entry_t* e = &msg->entries[0];
-    if (e->data_len > PAXOS_MAX_PAYLOAD_SIZE) return;
+    // FAANG: Fully implement Batch Acceptance for high-throughput mode!
+    for (size_t i = 0; i < msg->num_entries; i++) {
+        paxos_entry_t* e = &msg->entries[i];
+        uint64_t target_slot = msg->slot + i;
 
 #if !PAXOS_ENABLE_RECONFIG
-    if (e->type >= ENTRY_CONF_ADD && e->type <= ENTRY_CONF_FINAL) return;
+        if (e->type >= ENTRY_CONF_ADD && e->type <= ENTRY_CONF_FINAL) continue;
 #endif
 
-    paxos_entry_t* existing = paxos_log_get(p, msg->slot);
-    if (existing) {
-        if (existing->accepted_ballot > msg->ballot) { reply_nack(p, msg); return; }
-        if (existing->accepted_ballot == msg->ballot && !paxos_entry_value_equal(existing, e)) {
-            p->fatal_error = true;
-            return;
+        paxos_entry_t* existing = paxos_log_get(p, target_slot);
+        if (existing) {
+            if (existing->accepted_ballot > msg->ballot) { reply_nack(p, msg); return; }
+            if (existing->accepted_ballot == msg->ballot && !paxos_entry_value_equal(existing, e)) {
+                p->fatal_error = true;
+                return;
+            }
         }
-    }
 
-    p->promised_ballot = msg->ballot; p->leader_id = msg->from;
-    if (!paxos_log_accept(p, msg->slot, msg->ballot, e->type, e->client_id, e->client_seq, e->data, e->data_len)) return;
+        p->promised_ballot = msg->ballot; p->leader_id = msg->from;
+
+        if (!paxos_log_accept(p, target_slot, msg->ballot, e->type, e->client_id, e->client_seq, e->data, e->data_len)) return;
+
+        // Ensure we explicitly ACK every slot in the batch
+        paxos_msg_t res = { .type = MSG_ACCEPTED, .to = msg->from, .ballot = msg->ballot, .slot = target_slot };
+        paxos_send_after_persist(p, res);
+    }
 
     if (msg->commit_index > p->leader_commit_hint) p->leader_commit_hint = msg->commit_index;
 
-    paxos_msg_t res = { .type = MSG_ACCEPTED, .to = msg->from, .ballot = msg->ballot, .slot = msg->slot };
-    paxos_send_after_persist(p, res);
     paxos_advance_local_commit(p, msg->from, msg->ballot);
     check_and_fetch_gaps(p);
 }
