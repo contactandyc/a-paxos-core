@@ -232,15 +232,15 @@ static inline uint64_t paxos_peer_register(paxos_t* p, uint64_t node_id) {
 
     if (insert_idx == -1 || p->num_nodes >= MAX_PEERS) return 0;
 
-    // FAANG: Index Reclaiming Logic. Find the first empty bit in the 64-bit directory.
+    // FAANG: Hardware-accelerated O(1) Index Reclaiming.
+    // ~used_indices flips the bits so 1s represent free slots.
+    // __builtin_ctzll (Count Trailing Zeros) instantly finds the lowest free index in 1 CPU cycle!
     uint64_t used_indices = 0;
     for(int i = 0; i < 128; i++) if (p->peer_map[i].active) used_indices |= (1ULL << p->peer_map[i].index);
 
-    uint8_t free_index = 64;
-    for(uint8_t i = 0; i < 64; i++) {
-        if (!(used_indices & (1ULL << i))) { free_index = i; break; }
-    }
-    if (free_index == 64) return 0;
+    if (used_indices == ~0ULL) return 0; // All 64 slots are full
+
+    uint8_t free_index = __builtin_ctzll(~used_indices);
 
     p->peer_map[insert_idx].active = true;
     p->peer_map[insert_idx].tombstone = false;
