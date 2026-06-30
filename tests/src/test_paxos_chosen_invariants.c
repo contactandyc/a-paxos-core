@@ -16,7 +16,7 @@ MACRO_TEST(chosen_slot_preserves_state_on_safe_higher_ballot_accept) {
         .num_initial_voters = 3
     };
     paxos_t* p;
-    paxos_create(&cfg, &p);
+    (void)paxos_create(&cfg, &p);
 
     paxos_log_accept(p, 1, 5, PAXOS_ENTRY_NORMAL, 0, 0, (uint8_t*)"DATA", 4);
 
@@ -28,7 +28,7 @@ MACRO_TEST(chosen_slot_preserves_state_on_safe_higher_ballot_accept) {
 
     paxos_entry_t e = { .type = PAXOS_ENTRY_NORMAL, .data = (uint8_t*)"DATA", .data_len = 4 };
     paxos_msg_t acc = { .type = PAXOS_MSG_ACCEPT, .to = 1, .from = 2, .ballot = 10, .slot = 1, .entries = &e, .num_entries = 1 };
-    paxos_receive(p, &acc);
+    (void)paxos_receive(p, &acc);
 
     MACRO_ASSERT_TRUE(p->fatal_error == false);
     MACRO_ASSERT_TRUE(p->log_chunks[c_idx]->slots[c_off].is_chosen == true);
@@ -46,7 +46,7 @@ MACRO_TEST(chosen_slot_fatals_on_unsafe_higher_ballot_accept) {
         .num_initial_voters = 3
     };
     paxos_t* p;
-    paxos_create(&cfg, &p);
+    (void)paxos_create(&cfg, &p);
 
     paxos_log_accept(p, 1, 5, PAXOS_ENTRY_NORMAL, 0, 0, (uint8_t*)"DATA", 4);
 
@@ -54,7 +54,7 @@ MACRO_TEST(chosen_slot_fatals_on_unsafe_higher_ballot_accept) {
 
     paxos_entry_t e = { .type = PAXOS_ENTRY_NORMAL, .data = (uint8_t*)"EVIL", .data_len = 4 };
     paxos_msg_t acc = { .type = PAXOS_MSG_ACCEPT, .to = 1, .from = 2, .ballot = 10, .slot = 1, .entries = &e, .num_entries = 1 };
-    paxos_receive(p, &acc);
+    (void)paxos_receive(p, &acc);
 
     MACRO_ASSERT_TRUE(p->fatal_error == true);
 

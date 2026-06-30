@@ -9,16 +9,16 @@
 
 static void force_active_leader(paxos_t* p) {
     extern void paxos_proposer_campaign(paxos_t* p);
-    paxos_proposer_campaign(p);
+    (void)paxos_proposer_campaign(p);
     paxos_advance(p, NULL, 0, 0);
     if (p->num_nodes > 1) {
         uint64_t remote_peer = p->node_directory[1];
         paxos_msg_t prom = { .type = PAXOS_MSG_PROMISE, .to = p->id, .from = remote_peer, .ballot = p->active_ballot, .num_entries = 0 };
-        paxos_receive(p, &prom);
+    (void)paxos_receive(p, &prom);
         paxos_advance(p, NULL, 0, 0);
 
         paxos_msg_t ack = { .type = PAXOS_MSG_ACCEPTED, .to = p->id, .from = remote_peer, .ballot = p->active_ballot, .slot = p->next_slot - 1 };
-        paxos_receive(p, &ack);
+    (void)paxos_receive(p, &ack);
         paxos_advance(p, NULL, 0, 0);
     }
 }
@@ -32,7 +32,7 @@ MACRO_TEST(joint_consensus_two_phase_commit_completes_safely) {
         .num_initial_voters = 2
     };
     paxos_t* p;
-    paxos_create(&cfg, &p);
+    (void)paxos_create(&cfg, &p);
 
     force_active_leader(p);
 
@@ -43,7 +43,7 @@ MACRO_TEST(joint_consensus_two_phase_commit_completes_safely) {
     uint64_t new_node = 4;
     paxos_register_learner(p, new_node);
     paxos_msg_t catch_up_ack = { .type = PAXOS_MSG_ACCEPTED, .to = 1, .from = 4, .ballot = p->active_ballot, .slot = 1 };
-    paxos_receive(p, &catch_up_ack);
+    (void)paxos_receive(p, &catch_up_ack);
 
     // Simulate what a future paxos_propose_config() API would do internally
     uint64_t joint_nodes[] = {1, 2, 3, 4};
@@ -65,7 +65,7 @@ MACRO_TEST(joint_consensus_two_phase_commit_completes_safely) {
 
     // Form a quorum for the JOINT configuration
     paxos_msg_t ack_joint = { .type = PAXOS_MSG_ACCEPTED, .to = 1, .from = 2, .ballot = p->active_ballot, .slot = 2 };
-    paxos_receive(p, &ack_joint);
+    (void)paxos_receive(p, &ack_joint);
 
     MACRO_ASSERT_TRUE(p->in_joint_consensus == true);
     MACRO_ASSERT_EQ_INT(p->joint_config_mask, 15);
@@ -77,10 +77,10 @@ MACRO_TEST(joint_consensus_two_phase_commit_completes_safely) {
 
     // Now requires overlapping majority (requires Node 2 and Node 3 ACKs to satisfy the joint quorum)
     paxos_msg_t ack_final_2 = { .type = PAXOS_MSG_ACCEPTED, .to = 1, .from = 2, .ballot = p->active_ballot, .slot = 3 };
-    paxos_receive(p, &ack_final_2);
+    (void)paxos_receive(p, &ack_final_2);
 
     paxos_msg_t ack_final_3 = { .type = PAXOS_MSG_ACCEPTED, .to = 1, .from = 3, .ballot = p->active_ballot, .slot = 3 };
-    paxos_receive(p, &ack_final_3);
+    (void)paxos_receive(p, &ack_final_3);
 
     // System should seamlessly return to normal consensus under the new configuration
     MACRO_ASSERT_TRUE(p->in_joint_consensus == false);

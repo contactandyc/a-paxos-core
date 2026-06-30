@@ -9,16 +9,16 @@
 
 static void force_active_leader(paxos_t* p) {
     extern void paxos_proposer_campaign(paxos_t* p);
-    paxos_proposer_campaign(p);
+    (void)paxos_proposer_campaign(p);
     paxos_advance(p, NULL, 0, 0);
     if (p->num_nodes > 1) {
         uint64_t remote_peer = p->node_directory[1];
         paxos_msg_t prom = { .type = PAXOS_MSG_PROMISE, .to = p->id, .from = remote_peer, .ballot = p->active_ballot, .num_entries = 0 };
-        paxos_receive(p, &prom);
+    (void)paxos_receive(p, &prom);
         paxos_advance(p, NULL, 0, 0);
 
         paxos_msg_t ack = { .type = PAXOS_MSG_ACCEPTED, .to = p->id, .from = remote_peer, .ballot = p->active_ballot, .slot = p->next_slot - 1 };
-        paxos_receive(p, &ack);
+    (void)paxos_receive(p, &ack);
         paxos_advance(p, NULL, 0, 0);
     }
 }
@@ -32,7 +32,7 @@ MACRO_TEST(learner_firewall_blocks_blind_voters_via_api) {
         .num_initial_voters = 3
     };
     paxos_t* p;
-    paxos_create(&cfg, &p);
+    (void)paxos_create(&cfg, &p);
 
     force_active_leader(p); // Commit index is now 1
 
@@ -51,7 +51,7 @@ MACRO_TEST(learner_firewall_blocks_blind_voters_via_api) {
 
     // 3. Simulate Node 4 catching up and sending an ACK for Slot 1
     paxos_msg_t catch_up_ack = { .type = PAXOS_MSG_ACCEPTED, .to = 1, .from = 4, .ballot = p->active_ballot, .slot = 1 };
-    paxos_receive(p, &catch_up_ack);
+    (void)paxos_receive(p, &catch_up_ack);
 
     // 4. Propose Node 4 AGAIN now that it is caught up
     err = paxos_add_node(p, target);
@@ -72,7 +72,7 @@ MACRO_TEST(promotion_request_is_gated_by_firewall) {
         .num_initial_voters = 3
     };
     paxos_t* p;
-    paxos_create(&cfg, &p);
+    (void)paxos_create(&cfg, &p);
 
     force_active_leader(p); // Commit index is now 1
     uint64_t target = 4;
@@ -85,7 +85,7 @@ MACRO_TEST(promotion_request_is_gated_by_firewall) {
         .from = target,
         .ballot = p->active_ballot
     };
-    paxos_receive(p, &promote_req);
+    (void)paxos_receive(p, &promote_req);
 
     // The firewall drops the request silently. State machine is untouched.
     MACRO_ASSERT_EQ_INT(paxos_last_slot(p), 1);
@@ -93,10 +93,10 @@ MACRO_TEST(promotion_request_is_gated_by_firewall) {
 
     // 2. The Learner catches up
     paxos_msg_t catch_up_ack = { .type = PAXOS_MSG_ACCEPTED, .to = 1, .from = target, .ballot = p->active_ballot, .slot = 1 };
-    paxos_receive(p, &catch_up_ack);
+    (void)paxos_receive(p, &catch_up_ack);
 
     // 3. Valid Request: The Learner asks again
-    paxos_receive(p, &promote_req);
+    (void)paxos_receive(p, &promote_req);
 
     // The firewall passes! The leader successfully initiates joint consensus.
     MACRO_ASSERT_EQ_INT(paxos_last_slot(p), 2);

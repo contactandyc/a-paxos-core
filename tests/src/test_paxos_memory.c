@@ -9,17 +9,17 @@
 
 static void force_active_leader(paxos_t* p) {
     extern void paxos_proposer_campaign(paxos_t* p);
-    paxos_proposer_campaign(p);
+    (void)paxos_proposer_campaign(p);
     paxos_advance(p, NULL, 0, 0);
     if (p->num_nodes > 1) {
         uint64_t remote_peer = p->node_directory[1];
 
         paxos_msg_t prom = { .type = PAXOS_MSG_PROMISE, .to = p->id, .from = remote_peer, .ballot = p->active_ballot, .num_entries = 0 };
-        paxos_receive(p, &prom);
+    (void)paxos_receive(p, &prom);
         paxos_advance(p, NULL, 0, 0);
 
         paxos_msg_t ack = { .type = PAXOS_MSG_ACCEPTED, .to = p->id, .from = remote_peer, .ballot = p->active_ballot, .slot = p->next_slot - 1 };
-        paxos_receive(p, &ack);
+    (void)paxos_receive(p, &ack);
         paxos_advance(p, NULL, 0, 0);
     }
 }
@@ -33,7 +33,7 @@ MACRO_TEST(paxos_log_dynamically_allocates_chunks_on_sparse_accept) {
         .num_initial_voters = 2
     };
     paxos_t* p;
-    paxos_create(&cfg, &p);
+    (void)paxos_create(&cfg, &p);
 
     MACRO_ASSERT_EQ_INT(p->log_chunks_cap, 16);
 
@@ -58,18 +58,18 @@ MACRO_TEST(paxos_outbound_messages_use_zero_copy_ref_counting) {
         .num_initial_voters = 2
     };
     paxos_t* p;
-    paxos_create(&cfg, &p);
+    (void)paxos_create(&cfg, &p);
 
     force_active_leader(p);
 
     // Replaced manual MSG_PROPOSE construction with the new domain verb
-    paxos_propose(p, 0, 0, "PAYLOAD", 7);
+    (void)paxos_propose(p, 0, 0, "PAYLOAD", 7);
 
     paxos_entry_t* log_entry = paxos_log_get(p, 2);
     MACRO_ASSERT_TRUE(log_entry != NULL);
 
     paxos_ready_t ready;
-    paxos_get_ready(p, &ready);
+    (void)paxos_get_ready(p, &ready);
 
     MACRO_ASSERT_TRUE(ready.num_messages_after_persist > 0);
 
@@ -89,7 +89,7 @@ MACRO_TEST(paxos_compact_frees_obsolete_chunks_in_o1) {
         .num_initial_voters = 2
     };
     paxos_t* p;
-    paxos_create(&cfg, &p);
+    (void)paxos_create(&cfg, &p);
 
     paxos_log_accept(p, 5, 1, PAXOS_ENTRY_NORMAL, 0, 0, (uint8_t*)"A", 1);
     paxos_log_accept(p, 2500, 1, PAXOS_ENTRY_NORMAL, 0, 0, (uint8_t*)"B", 1);

@@ -11,7 +11,7 @@ MACRO_TEST(paxos_compact_removes_old_slots_and_advances_bounds) {
     uint64_t peers[] = {2, 3};
     paxos_config_t cfg = { .struct_size = sizeof(paxos_config_t), .node_id = 1, .initial_voters = peers, .num_initial_voters = 2 };
     paxos_t* p;
-    paxos_create(&cfg, &p);
+    (void)paxos_create(&cfg, &p);
 
     paxos_log_accept(p, 1, 1, PAXOS_ENTRY_NORMAL, 1, 1, (uint8_t*)"1", 1);
     paxos_log_accept(p, 2, 1, PAXOS_ENTRY_NORMAL, 1, 1, (uint8_t*)"2", 1);
@@ -35,7 +35,7 @@ MACRO_TEST(leader_rejects_fetch_entries_with_snapshot_install) {
     uint64_t peers[] = {2, 3};
     paxos_config_t cfg = { .struct_size = sizeof(paxos_config_t), .node_id = 1, .initial_voters = peers, .num_initial_voters = 2 };
     paxos_t* p;
-    paxos_create(&cfg, &p);
+    (void)paxos_create(&cfg, &p);
 
     p->state = PAXOS_STATE_ACTIVE;
     p->active_ballot = 5;
@@ -49,10 +49,10 @@ MACRO_TEST(leader_rejects_fetch_entries_with_snapshot_install) {
         .slot = 50,
         .commit_index = 105
     };
-    paxos_receive(p, &fetch);
+    (void)paxos_receive(p, &fetch);
 
     paxos_ready_t ready;
-    paxos_get_ready(p, &ready);
+    (void)paxos_get_ready(p, &ready);
 
     MACRO_ASSERT_EQ_INT(ready.num_messages_immediate, 1);
     MACRO_ASSERT_TRUE(ready.messages_immediate[0].type == PAXOS_MSG_INSTALL_SNAPSHOT);
@@ -66,7 +66,7 @@ MACRO_TEST(follower_accepts_snapshot_chunk_and_resets_log_on_completion) {
     uint64_t peers[] = {2, 3};
     paxos_config_t cfg = { .struct_size = sizeof(paxos_config_t), .node_id = 1, .initial_voters = peers, .num_initial_voters = 2 };
     paxos_t* p;
-    paxos_create(&cfg, &p);
+    (void)paxos_create(&cfg, &p);
 
     paxos_log_accept(p, 1, 1, PAXOS_ENTRY_NORMAL, 1, 1, (uint8_t*)"GARBAGE", 7);
 
@@ -81,10 +81,10 @@ MACRO_TEST(follower_accepts_snapshot_chunk_and_resets_log_on_completion) {
         .snapshot_offset = 0,
         .snapshot_done = true
     };
-    paxos_receive(p, &snap);
+    (void)paxos_receive(p, &snap);
 
     paxos_ready_t ready;
-    paxos_get_ready(p, &ready);
+    (void)paxos_get_ready(p, &ready);
     MACRO_ASSERT_TRUE(ready.install_snapshot);
     MACRO_ASSERT_EQ_INT(ready.snapshot_slot, 100);
     MACRO_ASSERT_EQ_INT(ready.snapshot_len, 8);
@@ -93,7 +93,7 @@ MACRO_TEST(follower_accepts_snapshot_chunk_and_resets_log_on_completion) {
     paxos_snapshot_acked(p, true);
 
     paxos_ready_t ready_ack;
-    paxos_get_ready(p, &ready_ack);
+    (void)paxos_get_ready(p, &ready_ack);
     MACRO_ASSERT_EQ_INT(ready_ack.num_messages_immediate, 1);
     MACRO_ASSERT_TRUE(ready_ack.messages_immediate[0].type == PAXOS_MSG_INSTALL_SNAPSHOT_RES);
 

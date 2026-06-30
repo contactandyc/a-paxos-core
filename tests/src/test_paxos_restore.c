@@ -14,6 +14,7 @@ MACRO_TEST(paxos_restores_from_hard_state_and_entries) {
     paxos_hard_state_t hs = { .promised_ballot = 15, .max_generated_ballot = 15 };
     paxos_entry_t e1 = { .slot = 1, .accepted_ballot = 10, .type = PAXOS_ENTRY_NORMAL, .data = (uint8_t*)"A", .data_len = 1 };
 
+    // Fixed: Removed the erroneous (void) casts from both data structs
     paxos_restored_entry_t restored_arr[1] = {
         { .entry = e1, .chosen = false }
     };
@@ -28,7 +29,7 @@ MACRO_TEST(paxos_restores_from_hard_state_and_entries) {
     };
 
     paxos_t* p;
-    paxos_restore(&cfg, &rd, &p);
+    (void)paxos_restore(&cfg, &rd, &p);
 
     MACRO_ASSERT_TRUE(p != NULL);
     MACRO_ASSERT_EQ_INT(paxos_promised_ballot(p), 15);

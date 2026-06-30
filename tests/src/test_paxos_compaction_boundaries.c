@@ -15,7 +15,7 @@ MACRO_TEST(compaction_shifts_correctly_at_chunk_boundaries) {
         .num_initial_voters = 3
     };
     paxos_t* p;
-    paxos_create(&cfg, &p);
+    (void)paxos_create(&cfg, &p);
 
     // Test Boundary 1: Compacting at 1023 (Base moves to 1024)
     paxos_log_accept(p, 1025, 1, PAXOS_ENTRY_NORMAL, 0, 0, (uint8_t*)"A", 1);

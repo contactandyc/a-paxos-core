@@ -16,7 +16,7 @@ MACRO_TEST(paxos_learner_detects_gap_and_fetches_entries) {
         .num_initial_voters = 2
     };
     paxos_t* p;
-    paxos_create(&cfg, &p);
+    (void)paxos_create(&cfg, &p);
 
     // Simulate Node 2 sending an Accept for slot 3, but piggybacking that slot 3 is committed!
     paxos_entry_t e = { .type = PAXOS_ENTRY_NORMAL, .data = (uint8_t*)"3", .data_len = 1 };
@@ -31,14 +31,14 @@ MACRO_TEST(paxos_learner_detects_gap_and_fetches_entries) {
         .num_entries = 1
     };
 
-    paxos_receive(p, &acc);
+    (void)paxos_receive(p, &acc);
 
     // The learner accepted slot 3, but its local_commit_index MUST stay at 0 due to the gap at 1 and 2.
     MACRO_ASSERT_EQ_INT(p->local_commit_index, 0);
     MACRO_ASSERT_EQ_INT(p->leader_commit_hint, 3);
 
     paxos_ready_t ready;
-    paxos_get_ready(p, &ready);
+    (void)paxos_get_ready(p, &ready);
 
     // It should have generated an immediate message asking Node 2 for the missing slots!
     MACRO_ASSERT_EQ_INT(ready.num_messages_immediate, 1);

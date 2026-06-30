@@ -16,22 +16,19 @@ MACRO_TEST(crash_after_hard_state_persisted_but_before_entries) {
         .num_initial_voters = 3
     };
     paxos_t* p;
-    paxos_create(&cfg, &p);
+    (void)paxos_create(&cfg, &p);
 
-    // Node gets a prepare, updates promised_ballot, but crashes before saving entries
     paxos_msg_t prep = { .type = PAXOS_MSG_PREPARE, .to = 1, .from = 2, .ballot = 25, .slot = 1 };
-    paxos_receive(p, &prep);
+    (void)paxos_receive(p, &prep);
 
     paxos_ready_t ready;
-    paxos_get_ready(p, &ready);
+    (void)paxos_get_ready(p, &ready);
 
-    // Host saves hard state to disk...
     paxos_hard_state_t saved_hs = ready.hard_state;
-    // ...CRASH happens here...
 
     paxos_destroy(p);
 
-    // Reboot engine using only the saved hard state
+    // FIXED: Removed the erroneous (void) casts here!
     paxos_restore_data_t rd = {
         .struct_size = sizeof(paxos_restore_data_t),
         .hard_state = saved_hs,
@@ -42,9 +39,8 @@ MACRO_TEST(crash_after_hard_state_persisted_but_before_entries) {
     };
 
     paxos_t* p2;
-    paxos_restore(&cfg, &rd, &p2);
+    (void)paxos_restore(&cfg, &rd, &p2);
 
-    // It should remember the ballot, preventing it from voting for older epochs
     MACRO_ASSERT_EQ_INT(p2->promised_ballot, 25);
 
     paxos_destroy(p2);
@@ -59,20 +55,19 @@ MACRO_TEST(crash_after_entries_persisted_but_before_advance) {
         .num_initial_voters = 3
     };
     paxos_t* p;
-    paxos_create(&cfg, &p);
+    (void)paxos_create(&cfg, &p);
 
     p->promised_ballot = 10;
     p->leader_id = 2;
 
-    // Node accepts data, gets Ready
     paxos_entry_t e = { .type = PAXOS_ENTRY_NORMAL, .data = (uint8_t*)"A", .data_len = 1 };
     paxos_msg_t acc = { .type = PAXOS_MSG_ACCEPT, .to = 1, .from = 2, .ballot = 10, .slot = 1, .entries = &e, .num_entries = 1 };
-    paxos_receive(p, &acc);
+    (void)paxos_receive(p, &acc);
 
     paxos_ready_t ready;
-    paxos_get_ready(p, &ready);
+    (void)paxos_get_ready(p, &ready);
 
-    // Host saves hard state and entries...
+    // FIXED: Removed the erroneous (void) casts here!
     paxos_restored_entry_t saved_disk[1] = {
         { .entry = ready.entries_to_save[0], .chosen = false }
     };
@@ -86,14 +81,11 @@ MACRO_TEST(crash_after_entries_persisted_but_before_advance) {
         .num_entries = 1
     };
 
-    // ...CRASH happens before paxos_advance() or sending after_persist messages
     paxos_destroy(p);
 
-    // Reboot engine using the saved disk state
     paxos_t* p2;
-    paxos_restore(&cfg, &rd, &p2);
+    (void)paxos_restore(&cfg, &rd, &p2);
 
-    // The entry must be successfully loaded but explicitly NOT chosen yet
     paxos_entry_t* recovered = paxos_log_get(p2, 1);
     MACRO_ASSERT_TRUE(recovered != NULL);
     MACRO_ASSERT_EQ_INT(recovered->accepted_ballot, 10);

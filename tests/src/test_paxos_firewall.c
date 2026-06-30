@@ -9,17 +9,17 @@
 
 static void force_active_leader(paxos_t* p) {
     extern void paxos_proposer_campaign(paxos_t* p);
-    paxos_proposer_campaign(p);
+    (void)paxos_proposer_campaign(p);
     paxos_advance(p, NULL, 0, 0);
     if (p->num_nodes > 1) {
         uint64_t remote_peer = p->node_directory[1];
 
         paxos_msg_t prom = { .type = PAXOS_MSG_PROMISE, .to = p->id, .from = remote_peer, .ballot = p->active_ballot, .num_entries = 0 };
-        paxos_receive(p, &prom);
+    (void)paxos_receive(p, &prom);
         paxos_advance(p, NULL, 0, 0);
 
         paxos_msg_t ack = { .type = PAXOS_MSG_ACCEPTED, .to = p->id, .from = remote_peer, .ballot = p->active_ballot, .slot = p->next_slot - 1 };
-        paxos_receive(p, &ack);
+    (void)paxos_receive(p, &ack);
         paxos_advance(p, NULL, 0, 0);
     }
 }
@@ -33,7 +33,7 @@ MACRO_TEST(paxos_silently_drops_messages_from_rogue_nodes) {
         .num_initial_voters = 2
     };
     paxos_t* p;
-    paxos_create(&cfg, &p);
+    (void)paxos_create(&cfg, &p);
 
     force_active_leader(p);
 
@@ -49,7 +49,7 @@ MACRO_TEST(paxos_silently_drops_messages_from_rogue_nodes) {
         .slot = 1
     };
 
-    paxos_receive(p, &rogue_prepare);
+    (void)paxos_receive(p, &rogue_prepare);
 
     // Node 1 must completely ignore the packet. It should still be the leader.
     MACRO_ASSERT_EQ_INT(paxos_state(p), PAXOS_STATE_ACTIVE);

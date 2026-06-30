@@ -16,7 +16,7 @@ MACRO_TEST(malformed_joint_config_lengths_are_rejected) {
         .num_initial_voters = 3
     };
     paxos_t* p;
-    paxos_create(&cfg, &p);
+    (void)paxos_create(&cfg, &p);
 
     // Payload is 10 bytes (not divisible by 8 byte uint64_t)
     uint8_t bad_data[10] = {0};
@@ -41,7 +41,7 @@ MACRO_TEST(joint_config_with_duplicate_nodes_is_rejected) {
         .num_initial_voters = 3
     };
     paxos_t* p;
-    paxos_create(&cfg, &p);
+    (void)paxos_create(&cfg, &p);
 
     // Payload tries to pass Node 2 twice!
     uint64_t bad_nodes[] = {1, 2, 2, 3};
@@ -66,7 +66,7 @@ MACRO_TEST(final_config_with_nonzero_payload_is_rejected) {
         .num_initial_voters = 3
     };
     paxos_t* p;
-    paxos_create(&cfg, &p);
+    (void)paxos_create(&cfg, &p);
 
     // FINAL configs must have 0 bytes of payload. We pass 8.
     uint64_t garbage = 99;

@@ -15,7 +15,7 @@ MACRO_TEST(paxos_initial_state_is_learner) {
         .num_initial_voters = 2
     };
     paxos_t* p;
-    paxos_create(&cfg, &p);
+    (void)paxos_create(&cfg, &p);
 
     MACRO_ASSERT_EQ_INT(paxos_state(p), PAXOS_STATE_LEARNER);
     MACRO_ASSERT_EQ_INT(paxos_promised_ballot(p), 0);
@@ -33,10 +33,10 @@ MACRO_TEST(paxos_campaign_generates_unique_ballot_and_broadcasts_prepare) {
         .num_initial_voters = 2
     };
     paxos_t* p;
-    paxos_create(&cfg, &p);
+    (void)paxos_create(&cfg, &p);
 
     extern void paxos_proposer_campaign(paxos_t* p);
-    paxos_proposer_campaign(p);
+    (void)paxos_proposer_campaign(p);
 
     MACRO_ASSERT_EQ_INT(paxos_state(p), PAXOS_STATE_RECOVERING_PHASE1);
     MACRO_ASSERT_TRUE(p->active_ballot > 0);
@@ -45,7 +45,7 @@ MACRO_TEST(paxos_campaign_generates_unique_ballot_and_broadcasts_prepare) {
     MACRO_ASSERT_EQ_INT(__builtin_popcountll(p->promise_mask), 1);
 
     paxos_ready_t ready;
-    paxos_get_ready(p, &ready);
+    (void)paxos_get_ready(p, &ready);
     MACRO_ASSERT_EQ_INT(ready.num_messages_after_persist, 2);
 
     MACRO_ASSERT_EQ_INT(ready.messages_after_persist[0].type, PAXOS_MSG_PREPARE);
