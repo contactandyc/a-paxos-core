@@ -94,7 +94,9 @@ paxos_err_t paxos_restore(const paxos_config_t* cfg, const paxos_restore_data_t*
 
     p->promised_ballot = restore->hard_state.promised_ballot;
     p->max_generated_ballot = restore->hard_state.max_generated_ballot;
-    p->prev_hard_state = restore->hard_state;
+    p->prev_promised_ballot = p->promised_ballot;
+    p->prev_max_generated_ballot = p->max_generated_ballot;
+    p->prev_pending_reconfig = restore->hard_state.pending_reconfig;
 
     if (restore->hard_state.num_active_nodes > 0) {
         p->active_config_mask = 0;
@@ -111,6 +113,9 @@ paxos_err_t paxos_restore(const paxos_config_t* cfg, const paxos_restore_data_t*
         p->in_joint_consensus = p->pending_reconfig && (p->joint_config_mask != 0);
         p->base_config_mask = p->active_config_mask;
     }
+
+    p->prev_active_config_mask = p->active_config_mask;
+    p->prev_joint_config_mask = p->joint_config_mask;
 
     p->snapshot_index = restore->snapshot_index;
     p->local_commit_index = restore->local_commit_index;
@@ -266,7 +271,6 @@ static bool paxos_is_valid_peer(paxos_t* p, uint64_t from_id) {
     return false;
 }
 
-
 static bool validate_entry(const paxos_entry_t* e) {
     if (e->data_len > PAXOS_MAX_PAYLOAD_SIZE) return false;
     if (e->data_len > 0 && !e->data) return false;
@@ -292,19 +296,17 @@ static bool validate_entry(const paxos_entry_t* e) {
     return true;
 }
 
-
 paxos_err_t paxos_receive(paxos_t* p, const paxos_msg_t* msg) {
     if (p->fatal_error || !msg || msg->to != p->id) return PAXOS_ERR_INVALID_ARG;
     if (!paxos_is_valid_peer(p, msg->from)) return PAXOS_ERR_INVALID_ARG;
 
-    // Cast away const strictly for internal dispatch; payload references are retained safely
     paxos_msg_t internal_msg = *msg;
+
     if (internal_msg.num_entries > 0 && internal_msg.entries) {
         for (size_t i = 0; i < internal_msg.num_entries; i++) {
             if (!validate_entry(&internal_msg.entries[i])) return PAXOS_ERR_INVALID_ARG;
         }
     }
-
 
     switch (internal_msg.type) {
         case PAXOS_MSG_PREPARE: case PAXOS_MSG_ACCEPT: case PAXOS_MSG_COMMIT_NOTICE:
@@ -313,8 +315,7 @@ paxos_err_t paxos_receive(paxos_t* p, const paxos_msg_t* msg) {
             paxos_acceptor_step(p, &internal_msg); break;
         case PAXOS_MSG_PROMISE: case PAXOS_MSG_ACCEPTED: case PAXOS_MSG_NACK:
         case PAXOS_MSG_FETCH_ENTRIES: case PAXOS_MSG_INSTALL_SNAPSHOT_RES:
-        case PAXOS_MSG_READ_BARRIER_RES:
-        case PAXOS_MSG_PROMOTE_REQUEST:
+        case PAXOS_MSG_READ_BARRIER_RES: case PAXOS_MSG_PROMOTE_REQUEST:
             paxos_proposer_step(p, &internal_msg); break;
         default: break;
     }
@@ -326,7 +327,6 @@ paxos_err_t paxos_receive(paxos_t* p, const paxos_msg_t* msg) {
 static void process_auto_proposals(paxos_t* p) {
     if (p->needs_conf_final && p->state == PAXOS_STATE_ACTIVE && p->id == p->leader_id) {
         p->needs_conf_final = false;
-        // Internal configuration finalization bypasses standard payload checks
         uint64_t slot = p->next_slot++;
         if (paxos_log_accept(p, slot, p->active_ballot, PAXOS_ENTRY_CONF_FINAL, 0, 0, NULL, 0)) {
             paxos_inflight_slot_t* inf = &p->inflight[slot % PAXOS_INTERNAL_INFLIGHT_WINDOW];
@@ -368,10 +368,10 @@ paxos_err_t paxos_get_ready(paxos_t* p, paxos_ready_t* ready) {
         }
     }
 
-    hs->has_update = (p->promised_ballot != p->prev_hard_state.promised_ballot) ||
-                     (p->max_generated_ballot != p->prev_hard_state.max_generated_ballot) ||
-                     (p->active_config_mask != p->prev_hard_state.active_config_mask) ||
-                     (p->joint_config_mask != p->prev_hard_state.joint_config_mask);
+    hs->has_update = (p->promised_ballot != p->prev_promised_ballot) ||
+                     (p->max_generated_ballot != p->prev_max_generated_ballot) ||
+                     (p->active_config_mask != p->prev_active_config_mask) ||
+                     (p->joint_config_mask != p->prev_joint_config_mask);
 
     ready->entries_to_save = paxos_log_extract_unstable(p, &ready->num_entries_to_save);
     ready->messages_immediate = p->msg_queue_immediate;
@@ -459,11 +459,11 @@ void paxos_advance(paxos_t* p, const uint64_t* stable_slots, size_t num_stable_s
     }
     p->num_unstable_slots = kept;
 
-    p->prev_hard_state.promised_ballot = p->promised_ballot;
-    p->prev_hard_state.max_generated_ballot = p->max_generated_ballot;
-    p->prev_hard_state.active_config_mask = p->active_config_mask;
-    p->prev_hard_state.joint_config_mask = p->joint_config_mask;
-    p->prev_hard_state.pending_reconfig = p->pending_reconfig;
+    p->prev_promised_ballot = p->promised_ballot;
+    p->prev_max_generated_ballot = p->max_generated_ballot;
+    p->prev_active_config_mask = p->active_config_mask;
+    p->prev_joint_config_mask = p->joint_config_mask;
+    p->prev_pending_reconfig = p->pending_reconfig;
 
     for (size_t i = 0; i < p->msg_queue_immediate_len; i++) paxos_msg_destroy_payload(&p->msg_queue_immediate[i]);
     p->msg_queue_immediate_len = 0;

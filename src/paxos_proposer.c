@@ -3,11 +3,6 @@
 
 #include "paxos_internal.h"
 
-// SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
-// SPDX-License-Identifier: Apache-2.0
-
-#include "paxos_internal.h"
-
 // --- INTERNAL HELPER ---
 static paxos_err_t submit_proposal(paxos_t* p, uint64_t cid, uint64_t cseq, paxos_entry_type_t type, const void* data, size_t data_len) {
     if (p->next_slot - p->local_commit_index >= PAXOS_INTERNAL_INFLIGHT_WINDOW) return PAXOS_ERR_QUEUE_FULL;
@@ -84,7 +79,6 @@ paxos_err_t paxos_add_node(paxos_t* p, uint64_t node_id) {
         if (p->node_directory[n] == node_id) { t_idx = n; found = true; break; }
     }
 
-    // Auto-register as learner if they don't exist yet
     if (!found && p->num_nodes < PAXOS_MAX_PEERS) {
         paxos_register_learner(p, node_id);
         for (size_t n = 0; n < PAXOS_MAX_PEERS; n++) {
@@ -94,10 +88,9 @@ paxos_err_t paxos_add_node(paxos_t* p, uint64_t node_id) {
 
     if (!found) return PAXOS_ERR_NOMEM;
 
-    // The Learner Firewall
     if (!p->learner_state[t_idx].eligible_to_vote ||
         p->learner_state[t_idx].caught_up_through < p->local_commit_index) {
-        return PAXOS_ERR_LEARNER_NOT_READY;
+        return PAXOS_ERR_LEARNER_NOT_READY; // Uses the newly added error code!
     }
 
     uint64_t joint_nodes[PAXOS_MAX_PEERS];
@@ -168,6 +161,7 @@ paxos_err_t paxos_read_barrier(paxos_t* p, uint64_t read_seq) {
     return PAXOS_OK;
 }
 
+// --- INTERNAL MESSAGE HANDLERS ---
 static void check_promise_quorum_and_activate(paxos_t* p) {
     if (paxos_has_quorum(p, p->promise_mask)) {
         p->state = PAXOS_STATE_RECOVERING_PHASE2;
@@ -253,7 +247,6 @@ static void check_promise_quorum_and_activate(paxos_t* p) {
                 if (paxos_has_quorum(p, n_inf->ack_mask)) {
                     n_inf->chosen = true;
                     paxos_log_learn_chosen(p, noop_slot, paxos_log_get_accepted(p, noop_slot));
-
                     p->local_commit_index = noop_slot; p->leader_commit_hint = noop_slot;
                     n_inf->active = false;
                 }
@@ -495,7 +488,7 @@ static void handle_fetch_entries(paxos_t* p, paxos_msg_t* msg) {
     paxos_msg_t res = { .type = PAXOS_MSG_FETCH_ENTRIES_RES, .to = msg->from, .ballot = p->active_ballot, .reject = false, .commit_index = p->local_commit_index };
 
     if (msg->slot <= p->snapshot_index) {
-        paxos_set_snapshot_chunk(p, msg->from, NULL, 0, 0, false);
+        (void)paxos_set_snapshot_chunk(p, msg->from, NULL, 0, 0, false);
         return;
     }
 
@@ -530,7 +523,7 @@ static void handle_install_snapshot_res(paxos_t* p, paxos_msg_t* msg) {
         }
     } else {
         p->snapshot_offset[peer_idx] = msg->slot;
-        paxos_set_snapshot_chunk(p, msg->from, NULL, 0, msg->slot, false);
+        (void)paxos_set_snapshot_chunk(p, msg->from, NULL, 0, msg->slot, false);
     }
 }
 
@@ -561,24 +554,29 @@ static void handle_read_barrier_res(paxos_t* p, paxos_msg_t* msg) {
     }
 }
 
-// 1. Add a small handler function
 static void handle_promote_request(paxos_t* p, paxos_msg_t* msg) {
-    // Only the active leader processes promotion requests
     if (p->state != PAXOS_STATE_ACTIVE || p->id != p->leader_id) return;
-
-    // Attempt to add the node.
-    // If the learner is lying or hasn't actually caught up to the commit index,
-    // the firewall inside paxos_add_node() will catch it and safely return
-    // PAXOS_ERR_LEARNER_NOT_READY, protecting the quorum!
-    paxos_err_t err = paxos_add_node(p, msg->from);
-
-    if (err != PAXOS_OK) {
-        // Optional: If you wanted to, you could send a NACK back to the learner here.
-        // But simply ignoring the premature request is safer and prevents DoS amplification.
-    }
+    (void)paxos_add_node(p, msg->from);
 }
 
-// 2. Wire it into the main switch statement in paxos_proposer_step()
+paxos_err_t paxos_request_promotion(paxos_t* p) {
+    if (p->fatal_error) return PAXOS_ERR_NOT_ACTIVE;
+
+    if (p->leader_id == 0 || p->leader_id == p->id) {
+        return PAXOS_ERR_INVALID_ARG;
+    }
+
+    paxos_msg_t req = {
+        .type = PAXOS_MSG_PROMOTE_REQUEST,
+        .to = p->leader_id,
+        .from = p->id,
+        .ballot = p->promised_ballot
+    };
+
+    paxos_send_immediate(p, req);
+    return PAXOS_OK;
+}
+
 void paxos_proposer_step(paxos_t* p, paxos_msg_t* msg) {
     switch (msg->type) {
         case PAXOS_MSG_PROMISE: handle_promise(p, msg); break;
@@ -587,7 +585,7 @@ void paxos_proposer_step(paxos_t* p, paxos_msg_t* msg) {
         case PAXOS_MSG_FETCH_ENTRIES: handle_fetch_entries(p, msg); break;
         case PAXOS_MSG_INSTALL_SNAPSHOT_RES: handle_install_snapshot_res(p, msg); break;
         case PAXOS_MSG_READ_BARRIER_RES: handle_read_barrier_res(p, msg); break;
-        case PAXOS_MSG_PROMOTE_REQUEST: handle_promote_request(p, msg); break; // <-- NEW
+        case PAXOS_MSG_PROMOTE_REQUEST: handle_promote_request(p, msg); break;
         default: break;
     }
 }

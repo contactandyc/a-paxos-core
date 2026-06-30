@@ -388,21 +388,21 @@ void paxos_advance_local_commit(paxos_t* p, uint64_t author_id, uint64_t author_
     }
 }
 
-bool paxos_set_snapshot_chunk(paxos_t* p, uint64_t peer_id, const uint8_t* data, size_t len, uint64_t offset, bool done) {
-    if (p->fatal_error || p->state != PAXOS_STATE_ACTIVE) return false;
+paxos_err_t paxos_set_snapshot_chunk(paxos_t* p, uint64_t peer_id, const uint8_t* data, size_t len, uint64_t offset, bool done) {
+    if (p->fatal_error || p->state != PAXOS_STATE_ACTIVE) return PAXOS_ERR_NOT_ACTIVE;
 
     size_t peer_idx = 0; bool found = false;
     for (size_t i = 0; i < PAXOS_MAX_PEERS; i++) {
         if (p->node_directory[i] == peer_id) { peer_idx = i; found = true; break; }
     }
-    if (!found) return false;
+    if (!found) return PAXOS_ERR_INVALID_ARG;
 
-    if (p->snapshot_offset[peer_idx] != offset) return false;
+    if (p->snapshot_offset[peer_idx] != offset) return PAXOS_ERR_INVALID_ARG;
 
     uint8_t* chunk = NULL;
     if (len > 0 && data) {
         chunk = malloc(len);
-        if (!chunk) { p->fatal_error = true; return false; }
+        if (!chunk) { p->fatal_error = true; return PAXOS_ERR_NOMEM; }
         memcpy(chunk, data, len);
     }
 
@@ -418,7 +418,7 @@ bool paxos_set_snapshot_chunk(paxos_t* p, uint64_t peer_id, const uint8_t* data,
     };
 
     paxos_send_immediate(p, snap);
-    return true;
+    return PAXOS_OK;
 }
 
 void paxos_snapshot_acked(paxos_t* p, bool success) {

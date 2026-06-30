@@ -43,7 +43,7 @@ static void handle_prepare(paxos_t* p, paxos_msg_t* msg) {
         if (!prom.entries && prom.num_entries > 0) return;
     }
 
-    if (p->promised_ballot == p->prev_hard_state.promised_ballot) paxos_send_immediate(p, prom);
+    if (p->promised_ballot == p->prev_promised_ballot) paxos_send_immediate(p, prom);
     else paxos_send_after_persist(p, prom);
 }
 
@@ -217,7 +217,7 @@ static void handle_read_barrier(paxos_t* p, paxos_msg_t* msg) {
 
     paxos_msg_t res = { .type = PAXOS_MSG_READ_BARRIER_RES, .to = msg->from, .ballot = p->promised_ballot, .read_seq = msg->read_seq };
 
-    if (p->promised_ballot == p->prev_hard_state.promised_ballot) paxos_send_immediate(p, res);
+    if (p->promised_ballot == p->prev_promised_ballot) paxos_send_immediate(p, res);
     else paxos_send_after_persist(p, res);
 }
 
