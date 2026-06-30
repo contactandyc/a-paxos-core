@@ -1,7 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
-//
-// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #define PAXOS_TESTING 1
 #include <stdio.h>
@@ -10,10 +8,17 @@
 
 MACRO_TEST(compaction_shifts_correctly_at_chunk_boundaries) {
     uint64_t peers[] = {1, 2, 3};
-    paxos_t* p = paxos_create(1, peers, 3);
+    paxos_config_t cfg = {
+        .struct_size = sizeof(paxos_config_t),
+        .node_id = 1,
+        .initial_voters = peers,
+        .num_initial_voters = 3
+    };
+    paxos_t* p;
+    paxos_create(&cfg, &p);
 
     // Test Boundary 1: Compacting at 1023 (Base moves to 1024)
-    paxos_log_accept(p, 1025, 1, ENTRY_NORMAL, 0, 0, (uint8_t*)"A", 1);
+    paxos_log_accept(p, 1025, 1, PAXOS_ENTRY_NORMAL, 0, 0, (uint8_t*)"A", 1);
     p->last_applied = 1023;
     paxos_compact(p, 1023); // Should shift exactly 1 chunk
 
@@ -22,7 +27,7 @@ MACRO_TEST(compaction_shifts_correctly_at_chunk_boundaries) {
     MACRO_ASSERT_TRUE(e != NULL);
 
     // Test Boundary 2: Compacting at 2047 (Base moves to 2048)
-    paxos_log_accept(p, 2050, 1, ENTRY_NORMAL, 0, 0, (uint8_t*)"B", 1);
+    paxos_log_accept(p, 2050, 1, PAXOS_ENTRY_NORMAL, 0, 0, (uint8_t*)"B", 1);
     p->last_applied = 2047;
     paxos_compact(p, 2047); // Should shift exactly 1 more chunk
 

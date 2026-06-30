@@ -10,13 +10,19 @@
 #include <stdlib.h>
 #include <stdatomic.h>
 
-#define MAX_PEERS 64
-#define MAX_PENDING_READS 128
-#define INFLIGHT_WINDOW 4096
-#define MAX_RECOVERY_GAP 100000
+#define PAXOS_INTERNAL_MAX_PENDING_READS 128
+#define PAXOS_INTERNAL_INFLIGHT_WINDOW 4096
+#define PAXOS_INTERNAL_MAX_RECOVERY_GAP 100000
+#define PAXOS_INTERNAL_LOG_CHUNK_SIZE 1024
+
+#ifndef PAXOS_ENABLE_RECONFIG
 #define PAXOS_ENABLE_RECONFIG 1
-#define PAXOS_LOG_CHUNK_SIZE 1024
-#define PAXOS_MAX_BATCH_BYTES 4194304
+#endif
+
+// PRNG Seed State
+typedef struct {
+    uint32_t state;
+} paxos_prng_t;
 
 typedef struct {
     _Atomic uint32_t ref_count;
@@ -49,16 +55,15 @@ static inline void paxos_payload_release(uint8_t* data) {
 }
 
 typedef struct {
+    paxos_entry_t accepted_entry;
+    paxos_entry_t chosen_entry;
     bool has_accepted;
     bool is_chosen;
     bool unstable;
-
-    paxos_entry_t accepted_entry;
-    paxos_entry_t chosen_entry;
 } paxos_log_slot_t;
 
 typedef struct {
-    paxos_log_slot_t slots[PAXOS_LOG_CHUNK_SIZE];
+    paxos_log_slot_t slots[PAXOS_INTERNAL_LOG_CHUNK_SIZE];
 } paxos_log_chunk_t;
 
 typedef struct {
@@ -84,13 +89,12 @@ typedef struct {
 } paxos_pending_read_t;
 
 typedef struct {
-    bool snapshot_installed;
     uint64_t caught_up_through;
+    bool snapshot_installed;
     bool hard_state_initialized;
     bool eligible_to_vote;
 } paxos_learner_state_t;
 
-// FAANG: O(1) Hash Map Entry WITH Tombstones
 typedef struct {
     uint64_t id;
     uint8_t index;
@@ -101,9 +105,11 @@ typedef struct {
 struct paxos_s {
     uint64_t id;
     paxos_state_t state;
+    paxos_prng_t prng;
 
-    uint64_t node_directory[MAX_PEERS];
+    uint64_t node_directory[PAXOS_MAX_PEERS];
     paxos_peer_map_entry_t peer_map[128];
+    uint64_t allocated_peer_indices;
     size_t num_nodes;
 
     uint64_t base_config_mask;
@@ -115,7 +121,13 @@ struct paxos_s {
 
     uint64_t promised_ballot;
     uint64_t max_generated_ballot;
-    paxos_hard_state_t prev_hard_state;
+
+    // Track previous states internally for diffing
+    uint64_t prev_promised_ballot;
+    uint64_t prev_max_generated_ballot;
+    uint64_t prev_active_config_mask;
+    uint64_t prev_joint_config_mask;
+    bool prev_pending_reconfig;
 
     paxos_log_chunk_t** log_chunks;
     size_t log_chunks_cap;
@@ -139,7 +151,7 @@ struct paxos_s {
     uint64_t next_slot;
     uint64_t leader_id;
 
-    paxos_learner_state_t learner_state[MAX_PEERS];
+    paxos_learner_state_t learner_state[PAXOS_MAX_PEERS];
 
     uint64_t promise_mask;
     bool self_promised;
@@ -157,24 +169,27 @@ struct paxos_s {
     size_t msg_queue_after_persist_cap;
     size_t msg_queue_after_persist_len;
 
-    uint64_t snapshot_offset[MAX_PEERS];
+    uint64_t snapshot_offset[PAXOS_MAX_PEERS];
 
-    bool pending_snapshot;
     uint8_t* pending_snapshot_data;
-    size_t pending_snapshot_len;
     uint64_t pending_snapshot_offset;
-    bool pending_snapshot_done;
     uint64_t pending_snapshot_from;
     uint64_t pending_snapshot_msg_slot;
     uint64_t pending_snapshot_msg_ballot;
     uint64_t expected_snapshot_offset;
+    size_t pending_snapshot_len;
+    bool pending_snapshot;
+    bool pending_snapshot_done;
     bool pending_snapshot_chunk_ready;
 
-    paxos_pending_read_t pending_reads[MAX_PENDING_READS];
+    paxos_pending_read_t pending_reads[PAXOS_INTERNAL_MAX_PENDING_READS];
     uint64_t current_read_seq;
     paxos_read_state_t* read_states;
     size_t read_states_cap;
     size_t num_read_states;
+
+    size_t max_payload_size;
+    size_t max_batch_bytes;
 
     uint32_t current_tick;
     uint32_t heartbeat_timeout;
@@ -197,14 +212,14 @@ static inline void paxos_entry_destroy(paxos_entry_t* e) {
 }
 
 static inline uint64_t paxos_chunk_idx(paxos_t* p, uint64_t slot) {
-    uint64_t base_c = p->log_base_slot / PAXOS_LOG_CHUNK_SIZE;
-    uint64_t slot_c = slot / PAXOS_LOG_CHUNK_SIZE;
+    uint64_t base_c = p->log_base_slot / PAXOS_INTERNAL_LOG_CHUNK_SIZE;
+    uint64_t slot_c = slot / PAXOS_INTERNAL_LOG_CHUNK_SIZE;
     if (slot_c < base_c) return 0;
     return slot_c - base_c;
 }
 
 static inline uint64_t paxos_chunk_off(uint64_t slot) {
-    return slot % PAXOS_LOG_CHUNK_SIZE;
+    return slot % PAXOS_INTERNAL_LOG_CHUNK_SIZE;
 }
 
 static inline uint64_t paxos_peer_bit(paxos_t* p, uint64_t node_id) {
@@ -230,17 +245,12 @@ static inline uint64_t paxos_peer_register(paxos_t* p, uint64_t node_id) {
         if (!p->peer_map[idx].active && !p->peer_map[idx].tombstone) break;
     }
 
-    if (insert_idx == -1 || p->num_nodes >= MAX_PEERS) return 0;
+    if (insert_idx == -1 || p->num_nodes >= PAXOS_MAX_PEERS) return 0;
 
-    // FAANG: Hardware-accelerated O(1) Index Reclaiming.
-    // ~used_indices flips the bits so 1s represent free slots.
-    // __builtin_ctzll (Count Trailing Zeros) instantly finds the lowest free index in 1 CPU cycle!
-    uint64_t used_indices = 0;
-    for(int i = 0; i < 128; i++) if (p->peer_map[i].active) used_indices |= (1ULL << p->peer_map[i].index);
+    if (p->allocated_peer_indices == ~0ULL) return 0;
 
-    if (used_indices == ~0ULL) return 0; // All 64 slots are full
-
-    uint8_t free_index = __builtin_ctzll(~used_indices);
+    uint8_t free_index = __builtin_ctzll(~p->allocated_peer_indices);
+    p->allocated_peer_indices |= (1ULL << free_index);
 
     p->peer_map[insert_idx].active = true;
     p->peer_map[insert_idx].tombstone = false;
@@ -251,13 +261,13 @@ static inline uint64_t paxos_peer_register(paxos_t* p, uint64_t node_id) {
     return 1ULL << free_index;
 }
 
-// FAANG: Safely removes peers, freeing up their slot in the 64-bit mask for new scaling instances.
 static inline void paxos_peer_deregister(paxos_t* p, uint64_t node_id) {
     if (node_id == 0) return;
     uint64_t start_idx = node_id % 128;
     for (int i = 0; i < 128; i++) {
         uint64_t idx = (start_idx + i) % 128;
         if (p->peer_map[idx].active && p->peer_map[idx].id == node_id) {
+            p->allocated_peer_indices &= ~(1ULL << p->peer_map[idx].index);
             p->peer_map[idx].active = false;
             p->peer_map[idx].tombstone = true;
             p->node_directory[p->peer_map[idx].index] = 0;
@@ -294,8 +304,6 @@ static inline uint64_t paxos_entry_hash(const paxos_entry_t* e) {
     if (!e) return 0;
     uint64_t hash = 14695981039346656037ULL;
 
-    // FAANG BUG FIX: Do NOT hash the accepted_ballot!
-    // It changes during leader transitions and breaks Fast-Path Commits.
     uint64_t meta[4] = { e->slot, (uint64_t)e->type, e->client_id, e->client_seq };
     uint8_t* p_bytes = (uint8_t*)meta;
     for (size_t i = 0; i < sizeof(meta); i++) {
@@ -331,8 +339,9 @@ static inline void observe_higher_ballot(paxos_t* p, uint64_t b) {
     }
 }
 
+paxos_err_t paxos_register_learner(paxos_t* p, uint64_t node_id);
 void paxos_rebuild_config(paxos_t* p);
-bool paxos_log_accept(paxos_t* p, uint64_t slot, uint64_t ballot, entry_type_t type, uint64_t cid, uint64_t cseq, const uint8_t* data, size_t data_len);
+bool paxos_log_accept(paxos_t* p, uint64_t slot, uint64_t ballot, paxos_entry_type_t type, uint64_t cid, uint64_t cseq, const uint8_t* data, size_t data_len);
 bool paxos_log_learn_chosen(paxos_t* p, uint64_t slot, const paxos_entry_t* entry);
 paxos_entry_t* paxos_log_get(paxos_t* p, uint64_t slot);
 paxos_entry_t* paxos_log_get_accepted(paxos_t* p, uint64_t slot);

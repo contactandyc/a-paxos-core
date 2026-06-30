@@ -5,7 +5,7 @@
 
 static void reply_nack(paxos_t* p, paxos_msg_t* msg) {
     paxos_msg_t nack = {
-        .type = MSG_NACK, .to = msg->from, .ballot = p->active_ballot,
+        .type = PAXOS_MSG_NACK, .to = msg->from, .ballot = p->active_ballot,
         .promised_ballot = p->last_observed_ballot > p->promised_ballot ? p->last_observed_ballot : p->promised_ballot
     };
     paxos_send_immediate(p, nack);
@@ -15,7 +15,7 @@ static void check_and_fetch_gaps(paxos_t* p) {
     if (p->local_commit_index < p->leader_commit_hint) {
         if (p->ticks_since_last_fetch > 10) {
             paxos_msg_t fetch = {
-                .type = MSG_FETCH_ENTRIES,
+                .type = PAXOS_MSG_FETCH_ENTRIES,
                 .to = p->leader_id,
                 .ballot = p->promised_ballot,
                 .slot = p->local_commit_index + 1,
@@ -36,7 +36,7 @@ static void handle_prepare(paxos_t* p, paxos_msg_t* msg) {
 
     p->promised_ballot = msg->ballot;
 
-    paxos_msg_t prom = { .type = MSG_PROMISE, .to = msg->from, .ballot = msg->ballot };
+    paxos_msg_t prom = { .type = PAXOS_MSG_PROMISE, .to = msg->from, .ballot = msg->ballot };
 
     if (p->highest_slot > p->snapshot_index) {
         prom.entries = paxos_log_extract_suffix(p, p->snapshot_index + 1, &prom.num_entries);
@@ -60,7 +60,7 @@ static void handle_accept(paxos_t* p, paxos_msg_t* msg) {
         uint64_t target_slot = msg->slot + i;
 
 #if !PAXOS_ENABLE_RECONFIG
-        if (e->type >= ENTRY_CONF_ADD && e->type <= ENTRY_CONF_FINAL) continue;
+        if (e->type >= PAXOS_ENTRY_CONF_ADD && e->type <= PAXOS_ENTRY_CONF_FINAL) continue;
 #endif
 
         paxos_entry_t* existing = paxos_log_get_accepted(p, target_slot);
@@ -80,12 +80,11 @@ static void handle_accept(paxos_t* p, paxos_msg_t* msg) {
         p->leader_id = msg->from;
 
         paxos_msg_t res = {
-            .type = MSG_ACCEPTED,
+            .type = PAXOS_MSG_ACCEPTED,
             .to = msg->from,
             .ballot = msg->ballot,
             .slot = msg->slot,
             .num_entries = successful_accepts,
-            // FAANG: Sign the full batch to match the Leader's expectations!
             .value_hash = paxos_batch_hash(msg->entries, successful_accepts)
         };
         paxos_send_after_persist(p, res);
@@ -134,18 +133,17 @@ static void handle_fetch_entries_res(paxos_t* p, paxos_msg_t* msg) {
         uint64_t c_off = paxos_chunk_off(s);
         if (c_idx >= p->log_chunks_cap || !p->log_chunks[c_idx] || !p->log_chunks[c_idx]->slots[c_off].is_chosen) break;
 
-        // FAANG: Increment index FIRST so the rebuild sees the new contiguous state!
         p->local_commit_index++;
 
 #if PAXOS_ENABLE_RECONFIG
-        if (p->log_chunks[c_idx]->slots[c_off].chosen_entry.type >= ENTRY_CONF_ADD &&
-            p->log_chunks[c_idx]->slots[c_off].chosen_entry.type <= ENTRY_CONF_FINAL) {
+        if (p->log_chunks[c_idx]->slots[c_off].chosen_entry.type >= PAXOS_ENTRY_CONF_ADD &&
+            p->log_chunks[c_idx]->slots[c_off].chosen_entry.type <= PAXOS_ENTRY_CONF_FINAL) {
             paxos_rebuild_config(p);
         }
 #endif
 
-        if (p->log_chunks[c_idx]->slots[c_off].chosen_entry.type == ENTRY_CONF_FINAL ||
-            p->log_chunks[c_idx]->slots[c_off].chosen_entry.type == ENTRY_CONF_REMOVE) {
+        if (p->log_chunks[c_idx]->slots[c_off].chosen_entry.type == PAXOS_ENTRY_CONF_FINAL ||
+            p->log_chunks[c_idx]->slots[c_off].chosen_entry.type == PAXOS_ENTRY_CONF_REMOVE) {
             if (!(p->active_config_mask & paxos_peer_bit(p, p->id))) {
                 p->state = PAXOS_STATE_LEARNER;
                 p->leader_id = 0;
@@ -160,26 +158,26 @@ static void handle_install_snapshot(paxos_t* p, paxos_msg_t* msg) {
     if (msg->ballot < p->promised_ballot) return;
 
     if (msg->slot <= p->snapshot_index || msg->slot <= p->last_applied) {
-        paxos_msg_t res = { .type = MSG_INSTALL_SNAPSHOT_RES, .to = msg->from, .ballot = p->promised_ballot, .reject = false, .slot = msg->slot, .snapshot_done = true };
+        paxos_msg_t res = { .type = PAXOS_MSG_INSTALL_SNAPSHOT_RES, .to = msg->from, .ballot = p->promised_ballot, .reject = false, .slot = msg->slot, .snapshot_done = true };
         paxos_send_immediate(p, res);
         return;
     }
 
     if (p->pending_snapshot_chunk_ready) {
-        paxos_msg_t res = { .type = MSG_INSTALL_SNAPSHOT_RES, .to = msg->from, .ballot = p->promised_ballot, .reject = true, .slot = p->expected_snapshot_offset - p->pending_snapshot_len };
+        paxos_msg_t res = { .type = PAXOS_MSG_INSTALL_SNAPSHOT_RES, .to = msg->from, .ballot = p->promised_ballot, .reject = true, .slot = p->expected_snapshot_offset - p->pending_snapshot_len };
         paxos_send_immediate(p, res);
         return;
     }
 
     if (msg->snapshot_len > 0 && !msg->snapshot_data) {
-        paxos_msg_t res = { .type = MSG_INSTALL_SNAPSHOT_RES, .to = msg->from, .ballot = p->promised_ballot, .reject = true, .slot = p->expected_snapshot_offset };
+        paxos_msg_t res = { .type = PAXOS_MSG_INSTALL_SNAPSHOT_RES, .to = msg->from, .ballot = p->promised_ballot, .reject = true, .slot = p->expected_snapshot_offset };
         paxos_send_immediate(p, res);
         return;
     }
 
     if (msg->snapshot_offset == 0) {
         if (p->pending_snapshot && p->pending_snapshot_msg_slot == msg->slot && p->expected_snapshot_offset > 0) {
-            paxos_msg_t res = { .type = MSG_INSTALL_SNAPSHOT_RES, .to = msg->from, .ballot = p->promised_ballot, .reject = true, .slot = p->expected_snapshot_offset };
+            paxos_msg_t res = { .type = PAXOS_MSG_INSTALL_SNAPSHOT_RES, .to = msg->from, .ballot = p->promised_ballot, .reject = true, .slot = p->expected_snapshot_offset };
             paxos_send_immediate(p, res);
             return;
         }
@@ -195,7 +193,7 @@ static void handle_install_snapshot(paxos_t* p, paxos_msg_t* msg) {
             p->pending_snapshot_len = 0;
         }
     } else if (!p->pending_snapshot || msg->snapshot_offset != p->expected_snapshot_offset) {
-        paxos_msg_t res = { .type = MSG_INSTALL_SNAPSHOT_RES, .to = msg->from, .ballot = p->promised_ballot, .reject = true, .slot = p->expected_snapshot_offset };
+        paxos_msg_t res = { .type = PAXOS_MSG_INSTALL_SNAPSHOT_RES, .to = msg->from, .ballot = p->promised_ballot, .reject = true, .slot = p->expected_snapshot_offset };
         paxos_send_immediate(p, res);
         return;
     }
@@ -217,7 +215,7 @@ static void handle_read_barrier(paxos_t* p, paxos_msg_t* msg) {
     observe_higher_ballot(p, msg->ballot);
     if (msg->ballot < p->promised_ballot) return;
 
-    paxos_msg_t res = { .type = MSG_READ_BARRIER_RES, .to = msg->from, .ballot = p->promised_ballot, .read_seq = msg->read_seq };
+    paxos_msg_t res = { .type = PAXOS_MSG_READ_BARRIER_RES, .to = msg->from, .ballot = p->promised_ballot, .read_seq = msg->read_seq };
 
     if (p->promised_ballot == p->prev_hard_state.promised_ballot) paxos_send_immediate(p, res);
     else paxos_send_after_persist(p, res);
@@ -225,13 +223,13 @@ static void handle_read_barrier(paxos_t* p, paxos_msg_t* msg) {
 
 void paxos_acceptor_step(paxos_t* p, paxos_msg_t* msg) {
     switch (msg->type) {
-        case MSG_PREPARE: handle_prepare(p, msg); break;
-        case MSG_ACCEPT: handle_accept(p, msg); break;
-        case MSG_COMMIT_NOTICE: handle_commit_notice(p, msg); break;
-        case MSG_FETCH_ENTRIES_RES: handle_fetch_entries_res(p, msg); break;
-        case MSG_INSTALL_SNAPSHOT: handle_install_snapshot(p, msg); break;
-        case MSG_READ_BARRIER: handle_read_barrier(p, msg); break;
-        case MSG_TICK: handle_commit_notice(p, msg); break;
+        case PAXOS_MSG_PREPARE: handle_prepare(p, msg); break;
+        case PAXOS_MSG_ACCEPT: handle_accept(p, msg); break;
+        case PAXOS_MSG_COMMIT_NOTICE: handle_commit_notice(p, msg); break;
+        case PAXOS_MSG_FETCH_ENTRIES_RES: handle_fetch_entries_res(p, msg); break;
+        case PAXOS_MSG_INSTALL_SNAPSHOT: handle_install_snapshot(p, msg); break;
+        case PAXOS_MSG_READ_BARRIER: handle_read_barrier(p, msg); break;
+        case PAXOS_MSG_HEARTBEAT: handle_commit_notice(p, msg); break;
         default: break;
     }
 }

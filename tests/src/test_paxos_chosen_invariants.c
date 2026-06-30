@@ -9,19 +9,26 @@
 
 MACRO_TEST(chosen_slot_preserves_state_on_safe_higher_ballot_accept) {
     uint64_t peers[] = {1, 2, 3};
-    paxos_t* p = paxos_create(1, peers, 3);
+    paxos_config_t cfg = {
+        .struct_size = sizeof(paxos_config_t),
+        .node_id = 1,
+        .initial_voters = peers,
+        .num_initial_voters = 3
+    };
+    paxos_t* p;
+    paxos_create(&cfg, &p);
 
-    paxos_log_accept(p, 1, 5, ENTRY_NORMAL, 0, 0, (uint8_t*)"DATA", 4);
+    paxos_log_accept(p, 1, 5, PAXOS_ENTRY_NORMAL, 0, 0, (uint8_t*)"DATA", 4);
 
-    // FAANG: Use the official API to safely commit the slot
+    // Use the official API to safely commit the slot
     paxos_log_learn_chosen(p, 1, paxos_log_get_accepted(p, 1));
 
     uint64_t c_idx = paxos_chunk_idx(p, 1);
     uint64_t c_off = paxos_chunk_off(1);
 
-    paxos_entry_t e = { .type = ENTRY_NORMAL, .data = (uint8_t*)"DATA", .data_len = 4 };
-    paxos_msg_t acc = { .type = MSG_ACCEPT, .to = 1, .from = 2, .ballot = 10, .slot = 1, .entries = &e, .num_entries = 1 };
-    paxos_step_remote(p, &acc);
+    paxos_entry_t e = { .type = PAXOS_ENTRY_NORMAL, .data = (uint8_t*)"DATA", .data_len = 4 };
+    paxos_msg_t acc = { .type = PAXOS_MSG_ACCEPT, .to = 1, .from = 2, .ballot = 10, .slot = 1, .entries = &e, .num_entries = 1 };
+    paxos_receive(p, &acc);
 
     MACRO_ASSERT_TRUE(p->fatal_error == false);
     MACRO_ASSERT_TRUE(p->log_chunks[c_idx]->slots[c_off].is_chosen == true);
@@ -32,15 +39,22 @@ MACRO_TEST(chosen_slot_preserves_state_on_safe_higher_ballot_accept) {
 
 MACRO_TEST(chosen_slot_fatals_on_unsafe_higher_ballot_accept) {
     uint64_t peers[] = {1, 2, 3};
-    paxos_t* p = paxos_create(1, peers, 3);
+    paxos_config_t cfg = {
+        .struct_size = sizeof(paxos_config_t),
+        .node_id = 1,
+        .initial_voters = peers,
+        .num_initial_voters = 3
+    };
+    paxos_t* p;
+    paxos_create(&cfg, &p);
 
-    paxos_log_accept(p, 1, 5, ENTRY_NORMAL, 0, 0, (uint8_t*)"DATA", 4);
+    paxos_log_accept(p, 1, 5, PAXOS_ENTRY_NORMAL, 0, 0, (uint8_t*)"DATA", 4);
 
     paxos_log_learn_chosen(p, 1, paxos_log_get_accepted(p, 1));
 
-    paxos_entry_t e = { .type = ENTRY_NORMAL, .data = (uint8_t*)"EVIL", .data_len = 4 };
-    paxos_msg_t acc = { .type = MSG_ACCEPT, .to = 1, .from = 2, .ballot = 10, .slot = 1, .entries = &e, .num_entries = 1 };
-    paxos_step_remote(p, &acc);
+    paxos_entry_t e = { .type = PAXOS_ENTRY_NORMAL, .data = (uint8_t*)"EVIL", .data_len = 4 };
+    paxos_msg_t acc = { .type = PAXOS_MSG_ACCEPT, .to = 1, .from = 2, .ballot = 10, .slot = 1, .entries = &e, .num_entries = 1 };
+    paxos_receive(p, &acc);
 
     MACRO_ASSERT_TRUE(p->fatal_error == true);
 

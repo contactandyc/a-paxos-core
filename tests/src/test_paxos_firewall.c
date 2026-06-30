@@ -1,7 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Andy Curtis <contactandyc@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
-//
-// Maintainer: Andy Curtis <contactandyc@gmail.com>
 
 #define PAXOS_TESTING 1
 #include <stdio.h>
@@ -16,19 +14,27 @@ static void force_active_leader(paxos_t* p) {
     if (p->num_nodes > 1) {
         uint64_t remote_peer = p->node_directory[1];
 
-        paxos_msg_t prom = { .type = MSG_PROMISE, .to = p->id, .from = remote_peer, .ballot = p->active_ballot, .num_entries = 0 };
-        paxos_step_remote(p, &prom);
+        paxos_msg_t prom = { .type = PAXOS_MSG_PROMISE, .to = p->id, .from = remote_peer, .ballot = p->active_ballot, .num_entries = 0 };
+        paxos_receive(p, &prom);
         paxos_advance(p, NULL, 0, 0);
 
-        paxos_msg_t ack = { .type = MSG_ACCEPTED, .to = p->id, .from = remote_peer, .ballot = p->active_ballot, .slot = p->next_slot - 1 };
-        paxos_step_remote(p, &ack);
+        paxos_msg_t ack = { .type = PAXOS_MSG_ACCEPTED, .to = p->id, .from = remote_peer, .ballot = p->active_ballot, .slot = p->next_slot - 1 };
+        paxos_receive(p, &ack);
         paxos_advance(p, NULL, 0, 0);
     }
 }
 
 MACRO_TEST(paxos_silently_drops_messages_from_rogue_nodes) {
     uint64_t peers[] = {2, 3}; // Valid cluster is {1, 2, 3}
-    paxos_t* p = paxos_create(1, peers, 2);
+    paxos_config_t cfg = {
+        .struct_size = sizeof(paxos_config_t),
+        .node_id = 1,
+        .initial_voters = peers,
+        .num_initial_voters = 2
+    };
+    paxos_t* p;
+    paxos_create(&cfg, &p);
+
     force_active_leader(p);
 
     MACRO_ASSERT_EQ_INT(paxos_state(p), PAXOS_STATE_ACTIVE);
@@ -36,14 +42,14 @@ MACRO_TEST(paxos_silently_drops_messages_from_rogue_nodes) {
     // Rogue Node 99 attempts a hostile takeover with a massive ballot
     uint64_t hostile_ballot = p->active_ballot + 5000;
     paxos_msg_t rogue_prepare = {
-        .type = MSG_PREPARE,
+        .type = PAXOS_MSG_PREPARE,
         .to = 1,
         .from = 99,
         .ballot = hostile_ballot,
         .slot = 1
     };
 
-    paxos_step_remote(p, &rogue_prepare);
+    paxos_receive(p, &rogue_prepare);
 
     // Node 1 must completely ignore the packet. It should still be the leader.
     MACRO_ASSERT_EQ_INT(paxos_state(p), PAXOS_STATE_ACTIVE);

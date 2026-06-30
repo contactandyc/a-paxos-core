@@ -37,24 +37,21 @@ void paxos_rebuild_config(paxos_t* p) {
 
         paxos_entry_t* e = &slot_data->chosen_entry;
 
-        if (e->type == ENTRY_CONF_ADD && e->data_len == sizeof(uint64_t)) {
+        if (e->type == PAXOS_ENTRY_CONF_ADD && e->data_len == sizeof(uint64_t)) {
             uint64_t target_node; memcpy(&target_node, e->data, sizeof(uint64_t));
             p->active_config_mask |= paxos_peer_register(p, target_node);
-        } else if (e->type == ENTRY_CONF_REMOVE && e->data_len == sizeof(uint64_t)) {
+        } else if (e->type == PAXOS_ENTRY_CONF_REMOVE && e->data_len == sizeof(uint64_t)) {
             uint64_t target_node; memcpy(&target_node, e->data, sizeof(uint64_t));
             p->active_config_mask &= ~paxos_peer_bit(p, target_node);
-
-            // FAANG: Safely reclaim the index using tombstones
             paxos_peer_deregister(p, target_node);
-
-        } else if (e->type == ENTRY_CONF_JOINT) {
+        } else if (e->type == PAXOS_ENTRY_CONF_JOINT) {
             uint64_t new_mask = 0; uint64_t* new_nodes = (uint64_t*)e->data;
             size_t count = e->data_len / sizeof(uint64_t);
             for(size_t j = 0; j < count; j++) new_mask |= paxos_peer_register(p, new_nodes[j]);
             p->joint_config_mask = new_mask;
             p->in_joint_consensus = true;
             p->pending_reconfig = true;
-        } else if (e->type == ENTRY_CONF_FINAL) {
+        } else if (e->type == PAXOS_ENTRY_CONF_FINAL) {
              p->active_config_mask = p->joint_config_mask;
              p->in_joint_consensus = false;
              p->pending_reconfig = false;
@@ -63,12 +60,9 @@ void paxos_rebuild_config(paxos_t* p) {
 #endif
 }
 
-bool paxos_log_accept(paxos_t* p, uint64_t slot, uint64_t ballot, entry_type_t type, uint64_t cid, uint64_t cseq, const uint8_t* data, size_t data_len) {
+bool paxos_log_accept(paxos_t* p, uint64_t slot, uint64_t ballot, paxos_entry_type_t type, uint64_t cid, uint64_t cseq, const uint8_t* data, size_t data_len) {
     if (p->fatal_error || slot <= p->snapshot_index || slot < p->log_base_slot) return false;
-
-    // FAANG: Reject gracefully if payload exceeds bounds to isolate partial batch failures
-    if (data_len > PAXOS_MAX_PAYLOAD_SIZE) return false;
-
+    if (data_len > p->max_payload_size) return false;
     if (data_len > 0 && !data) return false;
 
     uint64_t c_idx = paxos_chunk_idx(p, slot);
@@ -85,7 +79,6 @@ bool paxos_log_accept(paxos_t* p, uint64_t slot, uint64_t ballot, entry_type_t t
 
     if (!p->log_chunks[c_idx]) {
         p->log_chunks[c_idx] = calloc(1, sizeof(paxos_log_chunk_t));
-        // FAANG: Catch simulated OOM failure to prevent SEGFAULT on the next line!
         if (!p->log_chunks[c_idx]) { p->fatal_error = true; return false; }
     }
 
@@ -98,20 +91,16 @@ bool paxos_log_accept(paxos_t* p, uint64_t slot, uint64_t ballot, entry_type_t t
             return false;
         }
 
-        // FAANG: Fast path! Already durably chosen.
-        // We update the accepted_ballot to satisfy invariants without allocating new memory!
         if (ballot > s->accepted_entry.accepted_ballot) {
             if (s->has_accepted) paxos_entry_destroy(&s->accepted_entry);
             s->accepted_entry = s->chosen_entry;
             s->accepted_entry.accepted_ballot = ballot;
-            paxos_payload_retain(s->accepted_entry.data); // Zero-copy retention
+            paxos_payload_retain(s->accepted_entry.data);
             s->has_accepted = true;
         }
         return true;
     }
 
-    // FAANG: Simulated Fuzzer Optimization.
-    // Prevent catastrophic heap fragmentation during duplicate packet storms.
     if (s->has_accepted && paxos_entry_value_equal(&s->accepted_entry, &temp)) {
         if (ballot > s->accepted_entry.accepted_ballot) {
             s->accepted_entry.accepted_ballot = ballot;
@@ -127,7 +116,7 @@ bool paxos_log_accept(paxos_t* p, uint64_t slot, uint64_t ballot, entry_type_t t
             }
             s->unstable = true;
         }
-        return true; // Already safely tracked!
+        return true;
     }
 
     uint8_t* new_payload = NULL;
@@ -186,7 +175,6 @@ bool paxos_log_learn_chosen(paxos_t* p, uint64_t slot, const paxos_entry_t* entr
 
     if (!p->log_chunks[c_idx]) {
         p->log_chunks[c_idx] = calloc(1, sizeof(paxos_log_chunk_t));
-        // FAANG: Catch simulated OOM failure to prevent SEGFAULT on the next line!
         if (!p->log_chunks[c_idx]) { p->fatal_error = true; return false; }
     }
 
@@ -293,8 +281,8 @@ void paxos_compact(paxos_t* p, uint64_t up_to_slot) {
     uint64_t old_base = p->log_base_slot;
     uint64_t new_base = up_to_slot + 1;
 
-    uint64_t old_base_c = old_base / PAXOS_LOG_CHUNK_SIZE;
-    uint64_t new_base_c = new_base / PAXOS_LOG_CHUNK_SIZE;
+    uint64_t old_base_c = old_base / PAXOS_INTERNAL_LOG_CHUNK_SIZE;
+    uint64_t new_base_c = new_base / PAXOS_INTERNAL_LOG_CHUNK_SIZE;
     uint64_t shift_chunks = new_base_c > old_base_c ? new_base_c - old_base_c : 0;
     if (shift_chunks > p->log_chunks_cap) shift_chunks = p->log_chunks_cap;
 
@@ -303,19 +291,19 @@ void paxos_compact(paxos_t* p, uint64_t up_to_slot) {
 
     for (size_t c = start_c; c <= end_c && c < p->log_chunks_cap; c++) {
         if (!p->log_chunks[c]) continue;
-        for (size_t o = 0; o < PAXOS_LOG_CHUNK_SIZE; o++) {
+        for (size_t o = 0; o < PAXOS_INTERNAL_LOG_CHUNK_SIZE; o++) {
             paxos_log_slot_t* s_data = &p->log_chunks[c]->slots[o];
             if (!s_data->is_chosen || s_data->chosen_entry.slot < old_base || s_data->chosen_entry.slot > up_to_slot) continue;
 
 #if PAXOS_ENABLE_RECONFIG
             paxos_entry_t* e = &s_data->chosen_entry;
-            if (e->type == ENTRY_CONF_ADD && e->data_len == sizeof(uint64_t)) {
+            if (e->type == PAXOS_ENTRY_CONF_ADD && e->data_len == sizeof(uint64_t)) {
                 uint64_t target; memcpy(&target, e->data, sizeof(uint64_t));
                 p->base_config_mask |= paxos_peer_register(p, target);
-            } else if (e->type == ENTRY_CONF_REMOVE && e->data_len == sizeof(uint64_t)) {
+            } else if (e->type == PAXOS_ENTRY_CONF_REMOVE && e->data_len == sizeof(uint64_t)) {
                 uint64_t target; memcpy(&target, e->data, sizeof(uint64_t));
                 p->base_config_mask &= ~paxos_peer_bit(p, target);
-            } else if (e->type == ENTRY_CONF_FINAL) {
+            } else if (e->type == PAXOS_ENTRY_CONF_FINAL) {
                 p->base_config_mask = p->joint_config_mask;
             }
 #endif
@@ -325,7 +313,7 @@ void paxos_compact(paxos_t* p, uint64_t up_to_slot) {
     if (shift_chunks > 0) {
         for (size_t i = 0; i < shift_chunks; i++) {
             if (p->log_chunks[i]) {
-                for (size_t j = 0; j < PAXOS_LOG_CHUNK_SIZE; j++) {
+                for (size_t j = 0; j < PAXOS_INTERNAL_LOG_CHUNK_SIZE; j++) {
                     if (p->log_chunks[i]->slots[j].has_accepted) paxos_entry_destroy(&p->log_chunks[i]->slots[j].accepted_entry);
                     if (p->log_chunks[i]->slots[j].is_chosen) paxos_entry_destroy(&p->log_chunks[i]->slots[j].chosen_entry);
                 }
@@ -365,7 +353,7 @@ void paxos_compact(paxos_t* p, uint64_t up_to_slot) {
 }
 
 void paxos_advance_local_commit(paxos_t* p, uint64_t author_id, uint64_t author_ballot) {
-    (void)author_id; // FAANG: Unused in strict explicit-commit mode
+    (void)author_id;
     (void)author_ballot;
 
     while (p->local_commit_index < p->leader_commit_hint) {
@@ -380,23 +368,104 @@ void paxos_advance_local_commit(paxos_t* p, uint64_t author_id, uint64_t author_
 
         if (!s->is_chosen) break;
 
-        // FAANG: MUST increment index first so the O(1) Rebuilder can see the new slot!
         p->local_commit_index++;
 
 #if PAXOS_ENABLE_RECONFIG
-        if (s->chosen_entry.type >= ENTRY_CONF_ADD && s->chosen_entry.type <= ENTRY_CONF_FINAL) {
+        if (s->chosen_entry.type >= PAXOS_ENTRY_CONF_ADD && s->chosen_entry.type <= PAXOS_ENTRY_CONF_FINAL) {
             paxos_rebuild_config(p);
-            if (s->chosen_entry.type == ENTRY_CONF_JOINT && p->id == p->leader_id) {
+            if (s->chosen_entry.type == PAXOS_ENTRY_CONF_JOINT && p->id == p->leader_id) {
                 p->needs_conf_final = true;
             }
         }
 #endif
 
-        if (s->chosen_entry.type == ENTRY_CONF_FINAL || s->chosen_entry.type == ENTRY_CONF_REMOVE) {
+        if (s->chosen_entry.type == PAXOS_ENTRY_CONF_FINAL || s->chosen_entry.type == PAXOS_ENTRY_CONF_REMOVE) {
             if (!(p->active_config_mask & paxos_peer_bit(p, p->id))) {
                 p->state = PAXOS_STATE_LEARNER;
                 p->leader_id = 0;
             }
         }
+    }
+}
+
+bool paxos_set_snapshot_chunk(paxos_t* p, uint64_t peer_id, const uint8_t* data, size_t len, uint64_t offset, bool done) {
+    if (p->fatal_error || p->state != PAXOS_STATE_ACTIVE) return false;
+
+    size_t peer_idx = 0; bool found = false;
+    for (size_t i = 0; i < PAXOS_MAX_PEERS; i++) {
+        if (p->node_directory[i] == peer_id) { peer_idx = i; found = true; break; }
+    }
+    if (!found) return false;
+
+    if (p->snapshot_offset[peer_idx] != offset) return false;
+
+    uint8_t* chunk = NULL;
+    if (len > 0 && data) {
+        chunk = malloc(len);
+        if (!chunk) { p->fatal_error = true; return false; }
+        memcpy(chunk, data, len);
+    }
+
+    paxos_msg_t snap = {
+        .type = PAXOS_MSG_INSTALL_SNAPSHOT,
+        .to = peer_id,
+        .ballot = p->active_ballot,
+        .slot = p->snapshot_index,
+        .snapshot_offset = offset,
+        .snapshot_len = len,
+        .snapshot_data = chunk,
+        .snapshot_done = done
+    };
+
+    paxos_send_immediate(p, snap);
+    return true;
+}
+
+void paxos_snapshot_acked(paxos_t* p, bool success) {
+    if (!p->pending_snapshot) return;
+
+    p->pending_snapshot_chunk_ready = false;
+    uint64_t next_offset = success ? p->pending_snapshot_offset + p->pending_snapshot_len : p->pending_snapshot_offset;
+    if (!success) p->expected_snapshot_offset = p->pending_snapshot_offset;
+
+    paxos_msg_t res = {
+        .type = PAXOS_MSG_INSTALL_SNAPSHOT_RES,
+        .to = p->pending_snapshot_from,
+        .ballot = p->pending_snapshot_msg_ballot,
+        .reject = !success,
+        .slot = next_offset,
+        .snapshot_done = p->pending_snapshot_done
+    };
+
+    if (success && p->pending_snapshot_done) {
+        for (size_t c = 0; c < p->log_chunks_cap; c++) {
+            if (!p->log_chunks[c]) continue;
+            for (size_t o = 0; o < PAXOS_INTERNAL_LOG_CHUNK_SIZE; o++) {
+                if (p->log_chunks[c]->slots[o].has_accepted) paxos_entry_destroy(&p->log_chunks[c]->slots[o].accepted_entry);
+                if (p->log_chunks[c]->slots[o].is_chosen) paxos_entry_destroy(&p->log_chunks[c]->slots[o].chosen_entry);
+                p->log_chunks[c]->slots[o].has_accepted = false;
+                p->log_chunks[c]->slots[o].is_chosen = false;
+            }
+            free(p->log_chunks[c]);
+            p->log_chunks[c] = NULL;
+        }
+        p->log_base_slot = p->pending_snapshot_msg_slot + 1;
+        p->snapshot_index = p->pending_snapshot_msg_slot;
+        p->last_applied = p->snapshot_index;
+        p->local_commit_index = p->snapshot_index;
+        p->leader_commit_hint = p->snapshot_index;
+        paxos_rebuild_config(p);
+    }
+
+    paxos_send_immediate(p, res);
+
+    if (p->pending_snapshot_data) free(p->pending_snapshot_data);
+    p->pending_snapshot_data = NULL;
+    p->pending_snapshot_len = 0;
+
+    if (p->pending_snapshot_done || !success) {
+        p->pending_snapshot = false;
+        p->pending_snapshot_offset = 0;
+        p->pending_snapshot_done = false;
     }
 }
