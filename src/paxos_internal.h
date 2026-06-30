@@ -102,6 +102,14 @@ typedef struct {
     bool tombstone;
 } paxos_peer_map_entry_t;
 
+typedef struct {
+    uint64_t node_id;
+    uint64_t promised_ballot;
+    uint64_t local_commit_index;
+    bool is_active;
+    uint32_t last_active_tick;
+} paxos_peer_state_t;
+
 struct paxos_s {
     uint64_t id;
     paxos_state_t state;
@@ -196,6 +204,13 @@ struct paxos_s {
     uint32_t election_timeout;
     uint32_t randomized_election_timeout;
     uint32_t ticks_since_last_fetch;
+
+    paxos_peer_state_t *peer_states;
+    size_t num_peer_states;
+    size_t peer_states_cap;
+
+    bool needs_catchup;
+    uint64_t catchup_target_index;
 
     bool fatal_error;
 };

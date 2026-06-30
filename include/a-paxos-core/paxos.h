@@ -145,6 +145,9 @@ typedef struct {
     uint64_t snapshot_offset;
     bool install_snapshot;
     bool snapshot_done;
+
+    bool needs_catchup;             // True if the engine detected it is lagging
+    uint64_t catchup_target_index;  // The index the cluster is currently at
 } paxos_ready_t;
 
 // ABI Configuration Structs
@@ -200,5 +203,10 @@ uint64_t paxos_local_commit_index(paxos_t* p);
 uint64_t paxos_snapshot_index(paxos_t* p);
 uint64_t paxos_last_slot(paxos_t* p);
 bool paxos_has_fatal_error(paxos_t* p);
+
+// Metadata API
+size_t paxos_get_peers(paxos_t *p, uint64_t **out_node_ids);
+uint64_t paxos_peer_commit_index(paxos_t *p, uint64_t node_id);
+bool paxos_peer_is_leader(paxos_t *p, uint64_t node_id);
 
 #endif // PAXOS_H

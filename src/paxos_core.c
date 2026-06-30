@@ -2,14 +2,71 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "paxos_internal.h"
+#include <stdlib.h>
+#include <string.h>
 
-// Deterministic PRNG to replace global rand()
+// --- DETERMINISTIC PRNG ---
+
 static inline uint32_t paxos_rand(paxos_t* p) {
     p->prng.state = (p->prng.state * 1103515245 + 12345);
     return p->prng.state;
 }
 
 static void process_auto_proposals(paxos_t* p);
+
+// --- PEER METADATA TRACKING ---
+
+static paxos_peer_state_t* get_or_create_peer(paxos_t *p, uint64_t node_id) {
+    for (size_t i = 0; i < p->num_peer_states; i++) {
+        if (p->peer_states[i].node_id == node_id) {
+            return &p->peer_states[i];
+        }
+    }
+
+    if (p->num_peer_states == p->peer_states_cap) {
+        p->peer_states_cap = p->peer_states_cap == 0 ? 8 : p->peer_states_cap * 2;
+        paxos_peer_state_t *new_buf = realloc(p->peer_states, p->peer_states_cap * sizeof(paxos_peer_state_t));
+        if (!new_buf) { p->fatal_error = true; return NULL; }
+        p->peer_states = new_buf;
+    }
+
+    paxos_peer_state_t *peer = &p->peer_states[p->num_peer_states++];
+    peer->node_id = node_id;
+    peer->promised_ballot = 0;
+    peer->local_commit_index = 0;
+    peer->is_active = true;
+    peer->last_active_tick = p->current_tick;
+    return peer;
+}
+
+static void paxos_update_peer_metadata(paxos_t *p, const paxos_msg_t *msg) {
+    paxos_peer_state_t *peer = get_or_create_peer(p, msg->from);
+    if (!peer) return;
+
+    peer->is_active = true;
+    peer->last_active_tick = p->current_tick;
+
+    if (msg->ballot > peer->promised_ballot) {
+        peer->promised_ballot = msg->ballot;
+    }
+
+    if (msg->commit_index > peer->local_commit_index) {
+        peer->local_commit_index = msg->commit_index;
+    }
+
+    // THE CATCH-UP TRIGGER:
+    // If a peer is vastly ahead of us (buffer of 10 to absorb micro-jitter), flag it!
+    if (msg->commit_index > p->local_commit_index + 10) {
+        p->needs_catchup = true;
+
+        // Push the target index higher if multiple peers are ahead
+        if (msg->commit_index > p->catchup_target_index) {
+            p->catchup_target_index = msg->commit_index;
+        }
+    }
+}
+
+// --- LIFECYCLE ---
 
 paxos_err_t paxos_register_learner(paxos_t* p, uint64_t node_id) {
     if (!p || node_id == 0) return PAXOS_ERR_INVALID_ARG;
@@ -66,7 +123,10 @@ paxos_err_t paxos_create(const paxos_config_t* cfg, paxos_t** out) {
     p->recovery_cap = 1024;
     p->recovery_buffer = calloc(p->recovery_cap, sizeof(paxos_recovery_slot_t));
 
-    if (!p->log_chunks || !p->unstable_slots || !p->inflight || !p->recovery_buffer) {
+    p->peer_states_cap = 16;
+    p->peer_states = calloc(p->peer_states_cap, sizeof(paxos_peer_state_t));
+
+    if (!p->log_chunks || !p->unstable_slots || !p->inflight || !p->recovery_buffer || !p->peer_states) {
         paxos_destroy(p);
         return PAXOS_ERR_NOMEM;
     }
@@ -203,10 +263,14 @@ void paxos_destroy(paxos_t* p) {
         }
         free(p->msg_queue_after_persist);
     }
+
+    if (p->peer_states) free(p->peer_states);
     if (p->pending_snapshot_data) free(p->pending_snapshot_data);
     if (p->read_states) free(p->read_states);
     free(p);
 }
+
+// --- QUEUEING HELPERS ---
 
 static bool paxos_msg_queue_push(paxos_t* p, paxos_msg_t** queue, size_t* len, size_t* cap, paxos_msg_t msg) {
     if (*len >= *cap) {
@@ -228,6 +292,8 @@ void paxos_send_immediate(paxos_t* p, paxos_msg_t msg) {
 void paxos_send_after_persist(paxos_t* p, paxos_msg_t msg) {
     paxos_msg_queue_push(p, &p->msg_queue_after_persist, &p->msg_queue_after_persist_len, &p->msg_queue_after_persist_cap, msg);
 }
+
+// --- CORE TICK ---
 
 paxos_err_t paxos_tick(paxos_t* p) {
     if (p->fatal_error) return PAXOS_ERR_NOT_ACTIVE;
@@ -263,6 +329,8 @@ paxos_err_t paxos_tick(paxos_t* p) {
     }
     return PAXOS_OK;
 }
+
+// --- RECEIVE & VALIDATION ---
 
 static bool paxos_is_valid_peer(paxos_t* p, uint64_t from_id) {
     for (size_t i = 0; i < PAXOS_MAX_PEERS; i++) {
@@ -308,6 +376,9 @@ paxos_err_t paxos_receive(paxos_t* p, const paxos_msg_t* msg) {
         }
     }
 
+    // Update our internal map of who has what data for auto catch-up
+    paxos_update_peer_metadata(p, &internal_msg);
+
     switch (internal_msg.type) {
         case PAXOS_MSG_PREPARE: case PAXOS_MSG_ACCEPT: case PAXOS_MSG_COMMIT_NOTICE:
         case PAXOS_MSG_FETCH_ENTRIES_RES: case PAXOS_MSG_INSTALL_SNAPSHOT:
@@ -347,6 +418,8 @@ static void process_auto_proposals(paxos_t* p) {
         }
     }
 }
+
+// --- READY AND ADVANCE ---
 
 paxos_err_t paxos_get_ready(paxos_t* p, paxos_ready_t* ready) {
     if (p->fatal_error || !ready) return PAXOS_ERR_INVALID_ARG;
@@ -414,6 +487,11 @@ paxos_err_t paxos_get_ready(paxos_t* p, paxos_ready_t* ready) {
     ready->snapshot_len = p->pending_snapshot_len;
     ready->snapshot_offset = p->pending_snapshot_offset;
     ready->snapshot_done = p->pending_snapshot_done;
+
+    // Hand off the catch-up trigger to the Daemon
+    ready->needs_catchup = p->needs_catchup;
+    ready->catchup_target_index = p->catchup_target_index;
+
     return PAXOS_OK;
 }
 
@@ -471,7 +549,13 @@ void paxos_advance(paxos_t* p, const uint64_t* stable_slots, size_t num_stable_s
 
     for (size_t i = 0; i < p->msg_queue_after_persist_len; i++) paxos_msg_destroy_payload(&p->msg_queue_after_persist[i]);
     p->msg_queue_after_persist_len = 0;
+
+    // Reset catch-up triggers so the daemon doesn't fire continuously
+    p->needs_catchup = false;
+    p->catchup_target_index = 0;
 }
+
+// --- PUBLIC GETTERS ---
 
 paxos_state_t paxos_state(paxos_t* p) { return p ? p->state : PAXOS_STATE_LEARNER; }
 uint64_t paxos_promised_ballot(paxos_t* p) { return p ? p->promised_ballot : 0; }
@@ -479,3 +563,32 @@ uint64_t paxos_local_commit_index(paxos_t* p) { return p ? p->local_commit_index
 uint64_t paxos_snapshot_index(paxos_t* p) { return p ? p->snapshot_index : 0; }
 bool paxos_has_fatal_error(paxos_t* p) { return p ? p->fatal_error : true; }
 uint64_t paxos_last_slot(paxos_t* p) { return p ? p->highest_slot : 0; }
+
+// --- PUBLIC METADATA API ---
+
+size_t paxos_get_peers(paxos_t *p, uint64_t **out_node_ids) {
+    if (!p || p->num_peer_states == 0) {
+        *out_node_ids = NULL;
+        return 0;
+    }
+    *out_node_ids = malloc(p->num_peer_states * sizeof(uint64_t));
+    for (size_t i = 0; i < p->num_peer_states; i++) {
+        (*out_node_ids)[i] = p->peer_states[i].node_id;
+    }
+    return p->num_peer_states;
+}
+
+uint64_t paxos_peer_commit_index(paxos_t *p, uint64_t node_id) {
+    if (!p) return 0;
+    for (size_t i = 0; i < p->num_peer_states; i++) {
+        if (p->peer_states[i].node_id == node_id) {
+            return p->peer_states[i].local_commit_index;
+        }
+    }
+    return 0;
+}
+
+bool paxos_peer_is_leader(paxos_t *p, uint64_t node_id) {
+    if (!p) return false;
+    return (p->leader_id == node_id);
+}

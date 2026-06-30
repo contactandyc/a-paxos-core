@@ -35,7 +35,7 @@ MACRO_TEST(paxos_safely_accepts_config_and_engages_lock) {
     paxos_msg_t catch_up_ack = { .type = PAXOS_MSG_ACCEPTED, .to = 1, .from = 4, .ballot = p->active_ballot, .slot = 1 };
     (void)paxos_receive(p, &catch_up_ack);
 
-    paxos_add_node(p, new_node);
+    (void)paxos_add_node(p, new_node);
 
     MACRO_ASSERT_EQ_INT(paxos_last_slot(p), 2);
     MACRO_ASSERT_TRUE(p->pending_reconfig == true);
