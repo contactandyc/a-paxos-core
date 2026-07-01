@@ -5,6 +5,7 @@
 #define PAXOS_INTERNAL_H
 
 #include "a-paxos-core/paxos.h"
+#include <stdio.h>
 #include <string.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -349,6 +350,8 @@ static inline void observe_higher_ballot(paxos_t* p, uint64_t b) {
     if (b > p->last_observed_ballot) p->last_observed_ballot = b;
     if (b > p->active_ballot && (p->state == PAXOS_STATE_ACTIVE ||
         p->state == PAXOS_STATE_RECOVERING_PHASE1 || p->state == PAXOS_STATE_RECOVERING_PHASE2)) {
+        printf("[NODE %llu] 📉 Observed higher ballot %llu. Stepping down to LEARNER.\n",
+                       (unsigned long long)p->id, (unsigned long long)b);
         p->state = PAXOS_STATE_LEARNER;
         p->leader_id = 0;
     }

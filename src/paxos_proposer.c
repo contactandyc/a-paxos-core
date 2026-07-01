@@ -167,6 +167,9 @@ static void check_promise_quorum_and_activate(paxos_t* p) {
         p->state = PAXOS_STATE_RECOVERING_PHASE2;
         p->leader_id = p->id;
 
+        printf("[NODE %llu] 👑 Won election! Transitioning to LEADER for ballot %llu.\n",
+               (unsigned long long)p->id, (unsigned long long)p->active_ballot);
+
         uint64_t recovery_start = p->local_commit_index + 1;
         uint64_t deferred_commit_index = p->local_commit_index;
         uint64_t current_s = recovery_start;
@@ -276,6 +279,10 @@ void paxos_proposer_campaign(paxos_t* p) {
     p->state = PAXOS_STATE_RECOVERING_PHASE1;
     p->active_ballot = (p->active_ballot == 0) ? p->id : p->active_ballot + PAXOS_MAX_PEERS;
     if (p->active_ballot <= p->promised_ballot) p->active_ballot = p->promised_ballot + PAXOS_MAX_PEERS;
+
+    printf("[NODE %llu] ⏱️  Election timeout! Campaigning for ballot %llu.\n",
+           (unsigned long long)p->id, (unsigned long long)p->active_ballot);
+
     p->max_generated_ballot = p->active_ballot;
     p->promised_ballot = p->active_ballot;
     p->leader_id = p->id;
