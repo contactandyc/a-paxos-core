@@ -6,7 +6,8 @@
 #include "paxos_internal.h"
 #include "the-macro-library/macro_test.h"
 
-MACRO_TEST(nack_updates_last_observed_but_not_local_promise) {
+// Replace the old test with this updated one:
+MACRO_TEST(nack_fast_forwards_local_promise) {
     uint64_t peers[] = {1, 2, 3};
     paxos_config_t cfg = {
         .struct_size = sizeof(paxos_config_t),
@@ -24,7 +25,8 @@ MACRO_TEST(nack_updates_last_observed_but_not_local_promise) {
     paxos_msg_t nack = { .type = PAXOS_MSG_NACK, .to = 1, .from = 2, .ballot = 15, .promised_ballot = 50 };
     (void)paxos_receive(p, &nack);
 
-    MACRO_ASSERT_EQ_INT(p->promised_ballot, 10);
+    // FIX: The system now correctly fast-forwards to 50
+    MACRO_ASSERT_EQ_INT(p->promised_ballot, 50);
     MACRO_ASSERT_EQ_INT(p->last_observed_ballot, 50);
     MACRO_ASSERT_EQ_INT(p->state, PAXOS_STATE_LEARNER);
 
@@ -156,7 +158,7 @@ MACRO_TEST(crash_after_duplicate_prepare_recovers_safely) {
 int main(void) {
     macro_test_case tests[256];
     size_t test_count = 0;
-    MACRO_ADD(tests, nack_updates_last_observed_but_not_local_promise);
+    MACRO_ADD(tests, nack_fast_forwards_local_promise);
     MACRO_ADD(tests, duplicate_read_barrier_respects_persistence_ordering);
     MACRO_ADD(tests, fetch_entries_conflicting_with_chosen_slot_fatals);
     MACRO_ADD(tests, compaction_shifts_correctly_at_exact_chunk_sizes);

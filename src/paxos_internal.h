@@ -348,6 +348,9 @@ static inline uint64_t paxos_batch_hash(paxos_entry_t* entries, size_t num_entri
 
 static inline void observe_higher_ballot(paxos_t* p, uint64_t b) {
     if (b > p->last_observed_ballot) p->last_observed_ballot = b;
+
+    if (b > p->promised_ballot) p->promised_ballot = b;
+
     if (b > p->active_ballot && (p->state == PAXOS_STATE_ACTIVE ||
         p->state == PAXOS_STATE_RECOVERING_PHASE1 || p->state == PAXOS_STATE_RECOVERING_PHASE2)) {
         printf("[NODE %llu] 📉 Observed higher ballot %llu. Stepping down to LEARNER.\n",

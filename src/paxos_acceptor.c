@@ -34,6 +34,8 @@ static void handle_prepare(paxos_t* p, paxos_msg_t* msg) {
         reply_nack(p, msg); return;
     }
 
+    p->current_tick = 0;
+
     p->promised_ballot = msg->ballot;
 
     paxos_msg_t prom = { .type = PAXOS_MSG_PROMISE, .to = msg->from, .ballot = msg->ballot };
@@ -52,6 +54,8 @@ static void handle_accept(paxos_t* p, paxos_msg_t* msg) {
     if (msg->ballot < p->promised_ballot) {
         reply_nack(p, msg); return;
     }
+
+    p->current_tick = 0;
 
     size_t successful_accepts = 0;
 
@@ -104,6 +108,10 @@ static void handle_accept(paxos_t* p, paxos_msg_t* msg) {
 
 static void handle_commit_notice(paxos_t* p, paxos_msg_t* msg) {
     if (msg->ballot < p->promised_ballot) return;
+
+    p->current_tick = 0;
+    p->leader_id = msg->from;
+    p->promised_ballot = msg->ballot;
 
     if (msg->commit_index > 0 && msg->value_hash != 0) {
         paxos_entry_t* local = paxos_log_get_accepted(p, msg->commit_index);
